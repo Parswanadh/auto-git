@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(cat:*)",
+      "Bash(conda run:*)",
+      "Bash(wc:*)",
+      "Bash(ollama list:*)",
+      "Bash(ls:*)",
+      "Bash(dir:*)",
+      "Bash(tasklist:*)",
+      "Bash(echo:*)",
+      "Bash(timeout:*)",
+      "Bash(pip install:*)"
+    ]
+  }
+}

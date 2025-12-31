@@ -1,0 +1,117 @@
+# ============================================
+# AUTO-GIT PUBLISHER - Git Ignore
+# ============================================
+
+# ============================================
+# SENSITIVE FILES - NEVER COMMIT
+# ============================================
+.env
+*.key
+*.pem
+secrets/
+credentials/
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# ============================================
+# Data & Databases
+# ============================================
+data/
+*.db
+*.sqlite
+*.sqlite3
+vector_db/
+cache/
+*.pkl
+*.pickle
+
+# ============================================
+# Logs
+# ============================================
+logs/
+*.log
+*.out
+*.err
+
+# ============================================
+# Downloaded Papers
+# ============================================
+papers/
+pdfs/
+*.pdf
+
+# ============================================
+# Generated Code (temporary)
+# ============================================
+generated_repos/
+temp_repos/
+output/
+
+# ============================================
+# IDEs & Editors
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================
+# Testing
+# ============================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# ============================================
+# Jupyter
+# ============================================
+.ipynb_checkpoints
+*.ipynb
+
+# ============================================
+# OS
+# ============================================
+Thumbs.db
+Desktop.ini
+
+# ============================================
+# Project Specific
+# ============================================
+checkpoints/
+state_*.json
+pipeline_state.json
