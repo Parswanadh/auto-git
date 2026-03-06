@@ -10,6 +10,10 @@
 ### Actions Documented This Session
 - ✅ Confirmed GitHub push was executed via GitHub CLI + git (`gh auth setup-git`, `git add .`, `git commit`, `git push origin master`)
 - ✅ Re-checked main pipeline compile state — `src/langraph_pipeline/nodes.py` is currently syntax-clean again
+- ✅ Preserved and prepared the outstanding `nodes.py` fix-loop repair for push
+   - restores `_asyncio_fix` import in the fix-loop section
+   - removes duplicate timeout wrapper logic
+   - restores final artifact-strip + syntax-check block
 - ✅ Launched sub-agents to investigate root causes of pipeline slowness from both:
    - static code analysis
    - docs/logs/runtime evidence

@@ -7217,6 +7217,7 @@ Return ONLY valid Python code for each file, no explanations."""
                      '\u2018':"'",'\u2019':"'",'\u201a':"'",'\u201c':'"','\u201d':'"',
                      '\u201e':'"','\u00a0':' ','\u2026':'...','\u2212':'-','\ufeff':''}
 
+        import asyncio as _asyncio_fix
         _fix_semaphore = _asyncio_fix.Semaphore(4)  # max 4 concurrent LLM calls
 
         async def _fix_one_file(_fname: str, _content: str) -> tuple:
@@ -7286,16 +7287,6 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
             ]
 
             async with _fix_semaphore:
-                try:
-                    # Per-file timeout: 3 minutes max to prevent one slow call
-                    # from blocking the entire parallel batch
-                    response = await _asyncio_fix.wait_for(
-                        llm.ainvoke(messages),
-                        timeout=180  # 3 minutes per file
-                    )
-                except _asyncio_fix.TimeoutError:
-                    logger.warning(f"  ⏰ LLM fix timed out for {_fname} (180s) — keeping original")
-                    return (_fname, None)
                 _max_retries = 2  # Try same model once more before giving up
                 response = None
                 for _retry in range(_max_retries):
@@ -7333,12 +7324,13 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
             for _art_pat, _art_rep in _LLM_ARTIFACT_PATTERNS:
                 fixed_code = _art_pat.sub(_art_rep, fixed_code)
             import re as _re_artifact_fix
-            fixed_code = _re_artifact_fix.sub(r'\n{3,}', '\n\n', fixed_code
-                try:
-                    compile(fixed_code, _fname, "exec")
-                except SyntaxError as _se:
-                    _is_garbage = True
-                    logger.warning(f"  ⚠️ Fixed {_fname} has syntax error ({_se.msg} line {_se.lineno}) — keeping original")
+            fixed_code = _re_artifact_fix.sub(r'\n{3,}', '\n\n', fixed_code)
+            _is_garbage = False
+            try:
+                compile(fixed_code, _fname, "exec")
+            except SyntaxError as _se:
+                _is_garbage = True
+                logger.warning(f"  ⚠️ Fixed {_fname} has syntax error ({_se.msg} line {_se.lineno}) — keeping original")
 
             if _is_garbage:
                 console.print(f"  [yellow]⚠[/yellow] Kept original {_fname} (bad LLM response)")

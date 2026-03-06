@@ -22,6 +22,7 @@
 2. **Re-checked the pipeline compile blocker before doing more work**
 	- Re-ran error inspection on `src/langraph_pipeline/nodes.py`
 	- Confirmed the previously broken fix-loop section is now syntax-clean
+	- Preserved the local `nodes.py` fix-loop repair so it can be committed and pushed as part of this session
 
 3. **Inspected current bug surface**
 	- Checked `dashboard.py`
@@ -33,6 +34,10 @@
 	- Sub-agent B: docs/logs/runtime evidence analysis of actual delays
 
 5. **Started concrete bug fixing**
+	 - Retained the `src/langraph_pipeline/nodes.py` fix-loop repair:
+		 - restored missing `import asyncio as _asyncio_fix`
+		 - removed duplicated timeout wrapper code around LLM fixes
+		 - restored the final artifact-strip / syntax-check block
 	- Updated `requirements.txt` to add missing operational dependencies:
 	  - `ruff`
 	  - `bandit`
