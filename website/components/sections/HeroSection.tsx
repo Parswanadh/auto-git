@@ -53,7 +53,8 @@ function AnimatedCounter({ value, duration = 2, skipAnimation = false }: { value
 export default function HeroSection() {
   const { effectiveMode, motionTier } = usePresentationMode();
   const isLowMotion = motionTier === 'low';
-  const durationFactor = effectiveMode === 'evidence' ? 0.6 : 1;
+  const durationFactor = effectiveMode === 'evidence' ? 0.72 : 1;
+  const cinematicEase: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
   const stats = [
     { value: String(evidenceMetrics.pipelineNodes.value), label: 'Pipeline nodes', icon: '⚙️' },
@@ -73,9 +74,9 @@ export default function HeroSection() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <motion.div
           className="mx-auto mb-4 inline-flex items-center gap-2 rounded-full border border-[rgba(0,212,255,0.35)] bg-[rgba(0,212,255,0.12)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[#7DD3FC]"
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.42 * durationFactor, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 28, scale: 0.94, filter: 'blur(7px)' }}
+          animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+          transition={{ duration: 0.58 * durationFactor, ease: cinematicEase }}
         >
           Judge Showcase
           <span className="text-[rgba(248,250,252,0.7)]">Mode: {effectiveMode}</span>
@@ -83,9 +84,9 @@ export default function HeroSection() {
 
         <motion.h1
           className="font-orbitron font-bold text-4xl sm:text-5xl md:text-6xl lg:text-7xl mb-6 bg-gradient-to-r from-[#00D4FF] via-[#7C3AED] to-[#10B981] bg-clip-text text-transparent"
-          initial={{ opacity: 0, y: 30, scale: 0.95 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
-          transition={{ duration: 0.75 * durationFactor, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 52, scale: 0.84, filter: 'blur(14px)' }}
+          animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+          transition={{ duration: 0.92 * durationFactor, ease: cinematicEase }}
           whileHover={isLowMotion ? {} : { scale: 1.01 }}
         >
           From Idea To Tested Repo In One Autonomous Run
@@ -93,9 +94,9 @@ export default function HeroSection() {
 
         <motion.p
           className="text-lg md:text-2xl text-[rgba(248,250,252,0.78)] max-w-4xl mx-auto mb-8 font-rajdhani"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.65 * durationFactor, delay: 0.15, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 34, filter: 'blur(8px)' }}
+          animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+          transition={{ duration: 0.75 * durationFactor, delay: 0.14, ease: cinematicEase }}
         >
           Auto-GIT runs a full 19-stage engineering loop: research, multi-agent debate, code generation,
           validation, repair, and publish-ready outputs with evidence-first reporting.
@@ -103,9 +104,9 @@ export default function HeroSection() {
 
         <motion.div
           className="mx-auto mb-8 flex max-w-4xl flex-wrap items-center justify-center gap-3"
-          initial={{ opacity: 0, y: 14 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.55 * durationFactor, delay: 0.22, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 24, scale: 0.96 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.62 * durationFactor, delay: 0.22, ease: cinematicEase }}
         >
           <a
             href="#demo"
@@ -131,13 +132,13 @@ export default function HeroSection() {
 
         <motion.p
           className="mx-auto mb-8 text-sm text-[rgba(248,250,252,0.62)]"
-          initial={{ opacity: 0, y: 10 }}
+          initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.4 * durationFactor, delay: 0.28 }}
+          transition={{ duration: 0.44 * durationFactor, delay: 0.3, ease: cinematicEase }}
         >
           Need a hands-free booth walkthrough?
           {' '}
-          <a href="/?autodemo=1&autospeed=28#hero" className="font-semibold text-cyan-300 hover:text-cyan-200">
+          <a href="/?autodemo=1&autospeed=110#hero" className="font-semibold text-cyan-300 hover:text-cyan-200">
             Launch auto tour mode
           </a>
         </motion.p>
@@ -146,9 +147,9 @@ export default function HeroSection() {
 
         <motion.div
           className="mx-auto mb-10 flex max-w-5xl flex-wrap items-center justify-center gap-3"
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 * durationFactor, delay: 0.35, ease: 'easeOut' }}
+          initial={{ opacity: 0, y: 18, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ duration: 0.66 * durationFactor, delay: 0.34, ease: cinematicEase }}
         >
           {evidencePills.map((pill, index) => (
             <motion.div
@@ -156,7 +157,7 @@ export default function HeroSection() {
               className="rounded-full border border-[rgba(0,212,255,0.35)] bg-[linear-gradient(135deg,rgba(0,212,255,0.16),rgba(124,58,237,0.14))] px-4 py-2 text-sm font-semibold text-[rgba(248,250,252,0.92)] shadow-[0_0_18px_rgba(0,212,255,0.16)]"
               initial={{ opacity: 0, y: 8 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.42 * durationFactor, delay: 0.42 + index * 0.09, ease: 'easeOut' }}
+              transition={{ duration: 0.5 * durationFactor, delay: 0.44 + index * 0.1, ease: cinematicEase }}
               whileHover={isLowMotion ? {} : { y: -2, scale: 1.02 }}
             >
               {pill}
@@ -170,9 +171,9 @@ export default function HeroSection() {
             <motion.div
               key={stat.label}
               className="relative group"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.45 * durationFactor, delay: 0.45 + index * 0.08, ease: 'easeOut' }}
+              initial={{ opacity: 0, y: 30, scale: 0.93, filter: 'blur(8px)' }}
+              animate={{ opacity: 1, y: 0, scale: 1, filter: 'blur(0px)' }}
+              transition={{ duration: 0.56 * durationFactor, delay: 0.5 + index * 0.1, ease: cinematicEase }}
               whileHover={isLowMotion ? {} : { y: -6, transition: { duration: 0.2 } }}
             >
               <motion.div

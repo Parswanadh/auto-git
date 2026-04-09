@@ -67,11 +67,15 @@ html[data-motion-tier='low'] .meteor {
 }
 
 html[data-presentation-mode='safe'] .starfield,
+html[data-presentation-mode='safe'] .starfield-dense,
 html[data-motion-tier='low'] .starfield,
+html[data-motion-tier='low'] .starfield-dense,
 html[data-presentation-mode='safe'] .grid-background,
 html[data-motion-tier='low'] .grid-background,
 html[data-presentation-mode='safe'] .universe-backdrop,
-html[data-motion-tier='low'] .universe-backdrop {
+html[data-motion-tier='low'] .universe-backdrop,
+html[data-presentation-mode='safe'] .cosmic-vignette,
+html[data-motion-tier='low'] .cosmic-vignette {
   animation: none !important;
   opacity: 0.12 !important;
 }
@@ -87,7 +91,15 @@ html[data-presentation-mode='evidence'] .scanline-effect {
 
 html[data-presentation-mode='evidence'] .universe-meteors,
 html[data-presentation-mode='evidence'] .meteor {
-  opacity: 0.2;
+  opacity: 0.24;
+}
+
+html[data-presentation-mode='evidence'] .starfield-dense {
+  opacity: 0.35;
+}
+
+html[data-presentation-mode='evidence'] .cosmic-vignette {
+  opacity: 0.45;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -107,8 +119,10 @@ html[data-presentation-mode='evidence'] .meteor {
   .universe-meteors,
   .meteor,
   .starfield,
+  .starfield-dense,
   .grid-background,
   .universe-backdrop,
+  .cosmic-vignette,
   .sota-page-entry {
     animation: none !important;
   }
@@ -214,19 +228,19 @@ section {
   pointer-events: none;
   z-index: 1;
   overflow: hidden;
-  opacity: 0.55;
+  opacity: 0.72;
 }
 
 .meteor {
   position: absolute;
-  width: 220px;
-  height: 2px;
+  width: 280px;
+  height: 2.2px;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(224, 242, 254, 0.95), rgba(56, 189, 248, 0.72), rgba(56, 189, 248, 0));
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(248, 250, 252, 1), rgba(96, 165, 250, 0.92), rgba(56, 189, 248, 0));
   filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.6));
   transform: rotate(-24deg);
   opacity: 0;
-  animation: meteorFly 11s linear infinite;
+  animation: meteorFly 8.5s linear infinite;
 }
 
 .meteor-1 {
@@ -255,6 +269,62 @@ section {
   left: -28%;
   animation-delay: 7.4s;
   animation-duration: 11.2s;
+}
+
+.meteor-5 {
+  top: 8%;
+  left: -22%;
+  animation-delay: 1.1s;
+  animation-duration: 7.8s;
+}
+
+.meteor-6 {
+  top: 20%;
+  left: -36%;
+  animation-delay: 3.4s;
+  animation-duration: 9.1s;
+}
+
+.meteor-7 {
+  top: 34%;
+  left: -31%;
+  animation-delay: 4.8s;
+  animation-duration: 8.3s;
+}
+
+.meteor-8 {
+  top: 46%;
+  left: -18%;
+  animation-delay: 6.2s;
+  animation-duration: 8.9s;
+}
+
+.meteor-9 {
+  top: 58%;
+  left: -27%;
+  animation-delay: 8.1s;
+  animation-duration: 9.8s;
+}
+
+.meteor-10 {
+  top: 66%;
+  left: -14%;
+  animation-delay: 2.2s;
+  animation-duration: 7.6s;
+}
+
+.meteor-11 {
+  top: 78%;
+  left: -33%;
+  animation-delay: 5.6s;
+  animation-duration: 8.7s;
+}
+
+.meteor-12 {
+  top: 88%;
+  left: -19%;
+  animation-delay: 9.3s;
+  animation-duration: 10.4s;
 }
 
 @keyframes particleFloat {
@@ -420,6 +490,43 @@ section {
   animation: starfield 42s ease-in-out infinite, twinkleShift 9.5s ease-in-out infinite;
 }
 
+.starfield-dense {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.52;
+  background-image:
+    radial-gradient(1px 1px at 2% 14%, rgba(255, 255, 255, 0.92) 0%, transparent 70%),
+    radial-gradient(1px 1px at 7% 32%, rgba(125, 211, 252, 0.85) 0%, transparent 72%),
+    radial-gradient(1.2px 1.2px at 13% 54%, rgba(255, 255, 255, 0.82) 0%, transparent 72%),
+    radial-gradient(1px 1px at 18% 78%, rgba(167, 139, 250, 0.78) 0%, transparent 72%),
+    radial-gradient(1px 1px at 25% 24%, rgba(255, 255, 255, 0.88) 0%, transparent 72%),
+    radial-gradient(1.3px 1.3px at 31% 66%, rgba(74, 222, 128, 0.74) 0%, transparent 72%),
+    radial-gradient(1px 1px at 38% 12%, rgba(255, 255, 255, 0.84) 0%, transparent 72%),
+    radial-gradient(1px 1px at 43% 42%, rgba(125, 211, 252, 0.78) 0%, transparent 72%),
+    radial-gradient(1.2px 1.2px at 49% 88%, rgba(255, 255, 255, 0.88) 0%, transparent 72%),
+    radial-gradient(1px 1px at 56% 20%, rgba(165, 180, 252, 0.72) 0%, transparent 72%),
+    radial-gradient(1px 1px at 62% 58%, rgba(255, 255, 255, 0.82) 0%, transparent 72%),
+    radial-gradient(1px 1px at 67% 82%, rgba(134, 239, 172, 0.7) 0%, transparent 72%),
+    radial-gradient(1px 1px at 73% 14%, rgba(255, 255, 255, 0.9) 0%, transparent 72%),
+    radial-gradient(1px 1px at 79% 36%, rgba(196, 181, 253, 0.74) 0%, transparent 72%),
+    radial-gradient(1px 1px at 84% 64%, rgba(255, 255, 255, 0.86) 0%, transparent 72%),
+    radial-gradient(1.2px 1.2px at 90% 86%, rgba(125, 211, 252, 0.76) 0%, transparent 72%),
+    radial-gradient(1px 1px at 96% 50%, rgba(255, 255, 255, 0.88) 0%, transparent 72%);
+  animation: denseStarDrift 24s linear infinite, twinkleShift 5.8s ease-in-out infinite;
+}
+
+.cosmic-vignette {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: radial-gradient(circle at 50% 50%, transparent 44%, rgba(2, 6, 23, 0.56) 100%);
+  mix-blend-mode: multiply;
+  opacity: 0.66;
+}
+
 @keyframes starfield {
   0%, 100% {
     background-position: 0% 0%, 20% 10%, 40% 20%, 60% 30%, 80% 40%;
@@ -438,6 +545,15 @@ section {
   }
   50% {
     opacity: 0.72;
+  }
+}
+
+@keyframes denseStarDrift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-5vw, 4vh, 0);
   }
 }
 
@@ -480,14 +596,14 @@ section {
     transform: translate3d(0, 0, 0) rotate(-24deg);
     opacity: 0;
   }
-  8% {
-    opacity: 0.95;
+  6% {
+    opacity: 1;
   }
-  62% {
-    opacity: 0.82;
+  35% {
+    opacity: 0.9;
   }
   100% {
-    transform: translate3d(145vw, 86vh, 0) rotate(-24deg);
+    transform: translate3d(170vw, 102vh, 0) rotate(-24deg);
     opacity: 0;
   }
 }
@@ -829,8 +945,13 @@ section {
 @keyframes sotaPageEnter {
   0% {
     opacity: 0;
-    transform: translateY(18px) scale(0.992);
-    filter: blur(4px);
+    transform: translateY(54px) scale(0.95);
+    filter: blur(12px);
+  }
+  62% {
+    opacity: 1;
+    transform: translateY(-6px) scale(1.01);
+    filter: blur(0);
   }
   100% {
     opacity: 1;
@@ -840,5 +961,5 @@ section {
 }
 
 .sota-page-entry {
-  animation: sotaPageEnter 0.72s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: sotaPageEnter 0.95s cubic-bezier(0.22, 1, 0.36, 1) both;
 }

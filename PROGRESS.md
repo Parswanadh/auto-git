@@ -323,3 +323,109 @@ Result:
 4. Background shifted from static blue bias to layered smooth universe theme.
 5. Entry motion quality improved with controlled, motion-safe transitions.
 
+---
+
+## Session 29 - Visible Entry Motion + Shooting Star Upgrade
+
+**Date:** 2026-04-10  
+**Primary Goal:** Resolve user feedback that entry animations were not visible enough and background still felt below SOTA by adding stronger motion choreography and clear shooting stars.
+
+---
+
+## What Was Requested
+
+1. Entry animations must be clearly visible.
+2. Background quality must feel SOTA.
+3. Add shooting stars if possible.
+4. Use sequential-thinking MCP deeply.
+5. Update everything in PROGRESS.md.
+
+---
+
+## Sequential Thinking + Execution Method
+
+1. Ran an extended sequential-thinking chain (14 structured thoughts) to diagnose low perceived motion and prioritize changes.
+2. Identified root causes:
+	- Existing hero entry transitions were too subtle.
+	- Meteor density was too low (4 trails only).
+	- Cosmic depth lacked a high-frequency star layer and cinematic vignette contrast.
+3. Implemented one integrated pass with explicit visibility targets and fallback-safe behavior.
+
+---
+
+## Implementation Completed
+
+### 1. Hero Entry Motion Made Intentionally Obvious
+
+Updated file:
+
+1. `website/components/sections/HeroSection.tsx`
+
+Changes:
+
+1. Increased initial translation/scale/blur for badge, headline, subheading, CTA row, pills, and stats cards.
+2. Switched to cinematic easing tuple for smoother but stronger reveal.
+3. Increased reveal duration and stagger consistency so first load is clearly perceptible.
+4. Updated auto-tour launch URL in hero copy to faster demo speed:
+	- `/?autodemo=1&autospeed=110#hero`
+
+### 2. Shooting Stars Expanded Dramatically
+
+Updated files:
+
+1. `website/app/layout.tsx`
+2. `website/app/globals.css`
+
+Changes:
+
+1. Increased meteor elements from 4 to 12 (`meteor-1` through `meteor-12`).
+2. Increased trail length/brightness and tuned speed/opacity timing for clearer streak visibility.
+3. Adjusted meteor travel distance for full-screen diagonal sweeps.
+
+### 3. SOTA Cosmic Depth Pass
+
+Updated files:
+
+1. `website/app/layout.tsx`
+2. `website/app/globals.css`
+
+Changes:
+
+1. Added `starfield-dense` layer for high-frequency twinkling micro-stars.
+2. Added `cosmic-vignette` layer for cinematic depth and center focus.
+3. Tuned evidence/safe/reduced-motion selectors to include new layers.
+4. Rebalanced meteor and evidence-mode opacity to keep readability while preserving visual impact.
+
+### 4. Page-Level Entry Animation Strengthened
+
+Updated file:
+
+1. `website/app/globals.css`
+
+Changes:
+
+1. Upgraded `@keyframes sotaPageEnter` to stronger translate/scale/blur entry with soft settle.
+2. Increased animation duration for a clearer first-load impression.
+
+---
+
+## Validation Run
+
+Command:
+
+1. `npm run build` (from website app directory)
+
+Result:
+
+1. Build passed.
+2. Next.js compile, lint/type checks, and static generation passed.
+
+---
+
+## Status After Session 29
+
+1. Entry motion is now intentionally visible on first load.
+2. Background now includes dense stars + clearly visible shooting stars.
+3. Cosmic depth improved via layered starfield and vignette treatment.
+4. Motion fallbacks remain preserved for evidence/safe/reduced-motion scenarios.
+

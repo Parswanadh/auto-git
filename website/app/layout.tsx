@@ -32,6 +32,8 @@ export default function RootLayout({
           <div className="universe-nebula nebula-c" />
           <div className="universe-aurora" />
           <div className="starfield" />
+          <div className="starfield-dense" />
+          <div className="cosmic-vignette" />
           <div className="grid-background" />
 
           <div className="universe-meteors" aria-hidden="true">
@@ -39,6 +41,14 @@ export default function RootLayout({
             <span className="meteor meteor-2" />
             <span className="meteor meteor-3" />
             <span className="meteor meteor-4" />
+            <span className="meteor meteor-5" />
+            <span className="meteor meteor-6" />
+            <span className="meteor meteor-7" />
+            <span className="meteor meteor-8" />
+            <span className="meteor meteor-9" />
+            <span className="meteor meteor-10" />
+            <span className="meteor meteor-11" />
+            <span className="meteor meteor-12" />
           </div>
 
           {/* Floating orbs for visual depth */}
