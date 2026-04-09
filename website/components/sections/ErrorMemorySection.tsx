@@ -2,6 +2,7 @@
 
 import { motion, useInView } from 'framer-motion';
 import { useRef } from 'react';
+import { EVIDENCE_AS_OF, evidenceMetrics } from '@/data/evidenceMetrics';
 
 const errorEntries = [
   {
@@ -63,6 +64,9 @@ export default function ErrorMemorySection() {
             Every bug the pipeline encounters is recorded in a persistent JSONL file.
             Before generating code in future runs, the system reads its past mistakes
             and injects them as warnings. Like a bug database that trains the next run.
+          </p>
+          <p className="mt-3 text-sm text-[rgba(248,250,252,0.55)]">
+            Evidence snapshot: {evidenceMetrics.errorMemoryEntries.value} entries as of {EVIDENCE_AS_OF}.
           </p>
         </motion.div>
 
@@ -185,9 +189,9 @@ export default function ErrorMemorySection() {
           className="grid grid-cols-3 gap-4"
         >
           {[
-            { value: '233', label: 'Error entries recorded', color: '#EF4444' },
-            { value: '27', label: 'Pipeline runs learned from', color: '#00D4FF' },
-            { value: '0', label: 'Manual fixes (best run)', color: '#10B981' },
+            { value: String(evidenceMetrics.errorMemoryEntries.value), label: 'Error entries recorded', color: '#EF4444' },
+            { value: String(evidenceMetrics.runArtifactsTracked.value), label: 'Run artifacts tracked', color: '#00D4FF' },
+            { value: String(evidenceMetrics.unitTestsCollected.value), label: 'Unit tests collected', color: '#10B981' },
           ].map((stat) => (
             <div
               key={stat.label}

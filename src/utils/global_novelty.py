@@ -94,6 +94,7 @@ class GlobalNoveltyChecker:
         # Calculate novelty from similarity
         max_similarity = 1.0 - min(results["distances"][0])  # Convert distance to similarity
         novelty_score = (1.0 - max_similarity) * 10.0  # Scale to 0-10
+        novelty_score = max(0.0, min(10.0, novelty_score))
         
         # Format similar papers
         similar_papers = []
@@ -151,6 +152,7 @@ class GlobalNoveltyChecker:
         # Calculate novelty
         max_similarity = 1.0 - min(results["distances"][0])
         novelty_score = (1.0 - max_similarity) * 10.0
+        novelty_score = max(0.0, min(10.0, novelty_score))
         
         # Format results
         similar_papers = []

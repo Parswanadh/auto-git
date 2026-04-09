@@ -29,6 +29,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import hashlib
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -39,6 +41,16 @@ logger = logging.getLogger("docker_executor")
 DEFAULT_IMAGE = "python:3.10-slim"
 # Fallback images if the default isn't available
 FALLBACK_IMAGES = ["python:3.11-slim", "python:3.9-slim", "python:3-slim"]
+
+
+def _pip_cache_dir(project_dir: Path, image: str) -> Path:
+    """Return a persistent pip cache directory keyed by image + requirements."""
+    req_file = project_dir / "requirements.txt"
+    req_text = req_file.read_text(encoding="utf-8") if req_file.exists() else ""
+    cache_key = hashlib.sha256(f"{image}\n{req_text}".encode("utf-8")).hexdigest()[:16]
+    cache_dir = Path(__file__).resolve().parents[2] / "data" / "pip_cache" / cache_key
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
 
 
 @dataclass
@@ -183,6 +195,8 @@ class DockerSandboxExecutor:
         
         # Build the run command inside the container
         container_workdir = "/app"
+        container_name = f"autogit-sandbox-{uuid.uuid4().hex[:12]}"
+        pip_cache_dir = _pip_cache_dir(self.project_dir, self.image)
         
         # Build setup + run script that runs inside the container
         setup_commands = []
@@ -190,7 +204,7 @@ class DockerSandboxExecutor:
             req_file = self.project_dir / "requirements.txt"
             if req_file.exists():
                 setup_commands.append(
-                    "pip install --no-cache-dir --prefer-binary "
+                    "pip install --cache-dir /root/.cache/pip --prefer-binary "
                     "-r /app/requirements.txt 2>/dev/null || true"
                 )
         
@@ -204,14 +218,16 @@ class DockerSandboxExecutor:
         docker_cmd = [
             "docker", "run",
             "--rm",                              # Auto-remove container
+            "--name", container_name,
             f"--cpus={self.cpu_limit}",          # CPU limit
             f"--memory={self.memory_limit}",     # Memory limit
+            f"--memory-swap={self.memory_limit}",
             f"--network={self.network}",         # Network isolation
             "--read-only",                       # Read-only filesystem
             "--tmpfs", "/tmp:rw,size=100m",      # Writable /tmp (limited)
-            "--tmpfs", "/root/.cache:rw,size=200m",  # pip cache
             "-w", container_workdir,             # Working directory
             "-v", f"{self.project_dir.resolve()}:{container_workdir}:ro",  # Mount project read-only
+            "-v", f"{pip_cache_dir.resolve()}:/root/.cache/pip",
         ]
         
         # Add environment variables
@@ -227,15 +243,19 @@ class DockerSandboxExecutor:
             docker_cmd = [
                 "docker", "run",
                 "--rm",
+                "--name", container_name,
                 f"--cpus={self.cpu_limit}",
                 f"--memory={self.memory_limit}",
-                f"--network=bridge",  # Need network for pip install
+                f"--memory-swap={self.memory_limit}",
+                f"--network={self.network}",  # Need network for pip install
                 "-w", container_workdir,
                 "-v", f"{self.project_dir.resolve()}:{container_workdir}:ro",
+                "-v", f"{pip_cache_dir.resolve()}:/root/.cache/pip",
                 "--tmpfs", "/tmp:rw,size=200m",
                 "-e", "PYTHONIOENCODING=utf-8",
                 "-e", "PYTHONDONTWRITEBYTECODE=1",
                 "-e", "PIP_NO_INPUT=1",
+                "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
             ]
             if env_vars:
                 for k, v in env_vars.items():
@@ -274,7 +294,7 @@ class DockerSandboxExecutor:
             # Force kill any lingering container
             try:
                 subprocess.run(
-                    ["docker", "kill", "--signal=KILL"],
+                    ["docker", "rm", "-f", container_name],
                     capture_output=True, timeout=5,
                 )
             except Exception:

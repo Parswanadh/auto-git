@@ -2,6 +2,7 @@
 
 import React from 'react';
 import dynamic from 'next/dynamic';
+import { evidenceMetrics } from '@/data/evidenceMetrics';
 
 // Import Navigation directly
 import Navigation from '@/components/Navigation';
@@ -19,6 +20,7 @@ const TechStackSection = dynamic(() => import('@/components/sections/TechStackSe
 const CodeShowcaseSection = dynamic(() => import('@/components/sections/CodeShowcaseSection'));
 const MetricsDashboard = dynamic(() => import('@/components/sections/MetricsDashboard'));
 const ComparisonSection = dynamic(() => import('@/components/sections/ComparisonSection'));
+const BenchmarkSection = dynamic(() => import('@/components/sections/BenchmarkSection'));
 const ArchitectureSection = dynamic(() => import('@/components/sections/ArchitectureSection'));
 const LiveDemoSection = dynamic(() => import('@/components/sections/LiveDemoSection'));
 const RoadmapSection = dynamic(() => import('@/components/sections/RoadmapSection'));
@@ -90,6 +92,11 @@ export default function HomePage() {
         {React.createElement(ComparisonSection || 'div')}
       </section>
 
+      {/* Benchmark Section */}
+      <section id="benchmark" className="w-full">
+        {React.createElement(BenchmarkSection || 'div')}
+      </section>
+
       {/* Architecture Section */}
       <section id="architecture" className="w-full">
         {React.createElement(ArchitectureSection || 'div')}
@@ -138,20 +145,20 @@ export default function HomePage() {
               <h4 className="text-white font-semibold mb-4">System Stats</h4>
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
-                  <span className="text-cyan-400 font-semibold">47,726</span>
-                  <span className="text-slate-500 ml-1">LOC</span>
+                  <span className="text-cyan-400 font-semibold">{evidenceMetrics.sourcePythonLoc.value}</span>
+                  <span className="text-slate-500 ml-1">src LOC</span>
                 </div>
                 <div>
-                  <span className="text-purple-400 font-semibold">27</span>
-                  <span className="text-slate-500 ml-1">Runs</span>
+                  <span className="text-purple-400 font-semibold">{evidenceMetrics.runArtifactsTracked.value}</span>
+                  <span className="text-slate-500 ml-1">Artifacts</span>
                 </div>
                 <div>
-                  <span className="text-emerald-400 font-semibold">233</span>
+                  <span className="text-emerald-400 font-semibold">{evidenceMetrics.errorMemoryEntries.value}</span>
                   <span className="text-slate-500 ml-1">Errors</span>
                 </div>
                 <div>
-                  <span className="text-blue-400 font-semibold">27+</span>
-                  <span className="text-slate-500 ml-1">Models</span>
+                  <span className="text-blue-400 font-semibold">{evidenceMetrics.unitTestsCollected.value}</span>
+                  <span className="text-slate-500 ml-1">Unit Tests</span>
                 </div>
               </div>
             </div>

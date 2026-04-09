@@ -2,6 +2,8 @@
 
 import { motion, useInView } from 'framer-motion';
 import { useRef, useEffect, useState } from 'react';
+import { EVIDENCE_AS_OF, evidenceMetrics } from '@/data/evidenceMetrics';
+import TrustBadges from '@/components/TrustBadges';
 
 // Animated counter component
 function AnimatedCounter({ value, duration = 2 }: { value: string; duration?: number }) {
@@ -44,10 +46,16 @@ function AnimatedCounter({ value, duration = 2 }: { value: string; duration?: nu
 
 export default function HeroSection() {
   const stats = [
-    { value: '47726', label: 'Lines of Code', icon: '💻' },
-    { value: '27', label: 'Pipeline Runs', icon: '🔄' },
-    { value: '15', label: 'Pipeline Nodes', icon: '⚙️' },
-    { value: '233', label: 'Errors Learned', icon: '🧠' },
+    { value: String(evidenceMetrics.sourcePythonLoc.value), label: 'Python LOC in src', icon: '💻' },
+    { value: String(evidenceMetrics.unitTestsCollected.value), label: 'Unit tests collected', icon: '🧪' },
+    { value: String(evidenceMetrics.pipelineNodes.value), label: 'Pipeline nodes', icon: '⚙️' },
+    { value: String(evidenceMetrics.errorMemoryEntries.value), label: 'Error-memory entries', icon: '🧠' },
+  ];
+
+  const evidencePills = [
+    `${evidenceMetrics.pipelineNodes.value}-node execution policy coverage`,
+    `${evidenceMetrics.unitTestsCollected.value} unit tests collected (${EVIDENCE_AS_OF})`,
+    `${evidenceMetrics.errorMemoryEntries.value} error-memory entries`,
   ];
 
   return (
@@ -93,6 +101,28 @@ export default function HeroSection() {
           </motion.span>
           , research synthesis, and automated publishing.
         </motion.p>
+
+        <TrustBadges />
+
+        <motion.div
+          className="mx-auto mb-10 flex max-w-5xl flex-wrap items-center justify-center gap-3"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.7, delay: 0.35, ease: 'easeOut' }}
+        >
+          {evidencePills.map((pill, index) => (
+            <motion.div
+              key={pill}
+              className="rounded-full border border-[rgba(0,212,255,0.35)] bg-[linear-gradient(135deg,rgba(0,212,255,0.16),rgba(124,58,237,0.14))] px-4 py-2 text-sm font-semibold text-[rgba(248,250,252,0.92)] shadow-[0_0_18px_rgba(0,212,255,0.16)]"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.45, delay: 0.45 + index * 0.1, ease: 'easeOut' }}
+              whileHover={{ y: -2, scale: 1.02 }}
+            >
+              {pill}
+            </motion.div>
+          ))}
+        </motion.div>
 
         {/* Stats with circular progress indicators and counting animation */}
         <div className="flex flex-wrap justify-center gap-8 mb-12">

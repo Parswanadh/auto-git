@@ -27,6 +27,8 @@ from src.llm.hybrid_router import HybridRouter
 from src.llm.multi_backend_manager import get_backend_manager
 from src.utils.logger import get_logger
 
+logger = get_logger("multi_critic_consensus")
+
 # Import cross-examination prompts for multi-round debates
 try:
     from src.agents.meta_learning.cross_examination_prompts import (
@@ -38,8 +40,6 @@ try:
 except ImportError:
     CROSS_EXAM_AVAILABLE = False
     logger.warning("Cross-examination prompts not available")
-
-logger = get_logger("multi_critic_consensus")
 
 
 @dataclass

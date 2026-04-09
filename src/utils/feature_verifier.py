@@ -27,11 +27,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+FALLBACK_MARKER = "AUTOGIT_TEST_GEN_FALLBACK"
+
 
 # ─── Test harness template ──────────────────────────────────────────────────
 # This gets prepended to the LLM-generated feature tests.
 # It provides a structured JSON output format so we can parse results reliably.
 HARNESS_TEMPLATE = r'''
+# AUTO-GENERATED: LLM-generated feature verification tests
+# Trust level: low — runtime results are authoritative, assertions may be wrong
+# Generator: feature_verifier / auto-git pipeline
+#
 """Auto-generated feature verification tests."""
 import sys
 import os
@@ -221,6 +227,8 @@ class FeatureVerifier:
         # Combine harness + generated tests + runner
         full_script = HARNESS_TEMPLATE + "\n" + raw_tests + "\n\n"
         full_script += 'if __name__ == "__main__":\n    run_all_tests()\n'
+        full_script = self._sanitize_feature_test_functions(full_script)
+        full_script = self._harden_generated_feature_tests(full_script)
 
         # ── Syntax validation (catches LLM-generated syntax errors like
         #    unclosed f-string braces, missing quotes, etc.) ──────────────
@@ -250,7 +258,195 @@ class FeatureVerifier:
                 )
                 full_script = self._fallback_test_script(requirements)
 
+        # ── Auto-add missing imports for project-defined names ──────────
+        full_script = self._add_missing_project_imports(full_script, files)
+        full_script = self._sanitize_feature_test_functions(full_script)
+        full_script = self._harden_generated_feature_tests(full_script)
+
         return full_script
+
+    @staticmethod
+    def _add_missing_project_imports(script: str, files: Dict[str, str]) -> str:
+        """
+        Scan the generated test script for names that are used but not imported,
+        and are defined in the project's files. Add imports at the top of each
+        test function that uses them.
+        """
+        import ast as _ast
+        import re as _re
+
+        # Build a map: name → module (filename without .py)
+        project_names: Dict[str, str] = {}
+        for fname, fcode in files.items():
+            if not fname.endswith(".py") or not fcode:
+                continue
+            module = fname.rsplit(".", 1)[0]
+            try:
+                tree = _ast.parse(fcode)
+                for node in _ast.iter_child_nodes(tree):
+                    if isinstance(node, (_ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        project_names[node.name] = module
+                    elif isinstance(node, _ast.Assign):
+                        for t in node.targets:
+                            if isinstance(t, _ast.Name) and t.id.isupper():
+                                project_names[t.id] = module
+            except SyntaxError:
+                pass
+
+        if not project_names:
+            return script
+
+        # Find names used in the script that match project-defined names
+        # but aren't imported
+        try:
+            tree = _ast.parse(script)
+        except SyntaxError:
+            return script
+
+        # Collect all imported names
+        imported = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom):
+                for alias in node.names:
+                    imported.add(alias.asname or alias.name)
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    imported.add(alias.asname or alias.name)
+
+        # Find used but unimported project names
+        needed: Dict[str, str] = {}  # name → module
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Name) and node.id in project_names and node.id not in imported:
+                needed[node.id] = project_names[node.id]
+
+        if not needed:
+            return script
+
+        # Group by module
+        by_module: Dict[str, list] = {}
+        for name, mod in needed.items():
+            by_module.setdefault(mod, []).append(name)
+
+        import_lines = []
+        for mod, names in sorted(by_module.items()):
+            import_lines.append(f"from {mod} import {', '.join(sorted(names))}")
+
+        # Insert after the harness imports (find the first @feature_test or def test_ line)
+        insert_point = _re.search(r'^@feature_test|^def test_', script, _re.MULTILINE)
+        if insert_point:
+            pos = insert_point.start()
+            import_block = "\n".join(import_lines) + "\n\n"
+            script = script[:pos] + import_block + script[pos:]
+
+        return script
+
+    @staticmethod
+    def _sanitize_feature_test_functions(script: str) -> str:
+        """
+        Normalize generated feature test functions so they run in our harness.
+
+        - Convert `def test_x(monkeypatch, capsys):` to `def test_x():`
+        - Auto-add `import pytest` if pytest symbols are used
+        """
+        lines = script.splitlines()
+        out: List[str] = []
+        fn_pattern = re.compile(
+            r"^(\s*def\s+test_[A-Za-z0-9_]+\s*)\(([^)]*)\)(\s*:\s*)$"
+        )
+
+        for line in lines:
+            m = fn_pattern.match(line)
+            if m:
+                params = (m.group(2) or "").strip()
+                if params and params != "self":
+                    line = f"{m.group(1)}(){m.group(3)}"
+            out.append(line)
+
+        sanitized = "\n".join(out)
+        if (
+            "pytest." in sanitized
+            and not re.search(r"^\s*import\s+pytest\b", sanitized, re.MULTILINE)
+            and not re.search(r"^\s*from\s+pytest\b", sanitized, re.MULTILINE)
+        ):
+            if "import traceback\n" in sanitized:
+                sanitized = sanitized.replace("import traceback\n", "import traceback\nimport pytest\n", 1)
+            else:
+                sanitized = "import pytest\n" + sanitized
+
+        return sanitized
+
+    @staticmethod
+    def _harden_generated_feature_tests(script: str) -> str:
+        """
+        Apply deterministic hardening to common fragile LLM test patterns.
+
+        - Remove accidental self-imports from feature_tests.py
+        - Guard dictionary id extraction to avoid NoneType/index errors
+        - Use robust file cleanup helper for Windows sqlite lock timing
+        - Best-effort close open Storage connections before deleting db files
+        """
+        script = re.sub(
+            r"^\s*from\s+feature_tests\s+import\s+.*\n",
+            "",
+            script,
+            flags=re.MULTILINE,
+        )
+
+        if "def _safe_remove_file(" not in script:
+            helper_block = (
+                "\n"
+                "def _require_id(payload, context='payload'):\n"
+                "    assert isinstance(payload, dict), f\"{context} should be a dict, got {type(payload).__name__}\"\n"
+                "    assert 'id' in payload, f\"{context} missing id field: {payload}\"\n"
+                "    return payload['id']\n\n"
+                "def _safe_dispose_storage(obj):\n"
+                "    conn = getattr(obj, 'conn', None)\n"
+                "    if conn is not None:\n"
+                "        try:\n"
+                "            conn.close()\n"
+                "        except Exception:\n"
+                "            pass\n\n"
+                "def _safe_remove_file(path, retries=8, delay=0.15):\n"
+                "    import gc\n"
+                "    import time\n"
+                "    if not path:\n"
+                "        return\n"
+                "    for _ in range(max(1, int(retries))):\n"
+                "        try:\n"
+                "            if os.path.exists(path):\n"
+                "                os.unlink(path)\n"
+                "            return\n"
+                "        except PermissionError:\n"
+                "            gc.collect()\n"
+                "            time.sleep(delay)\n"
+            )
+            script = script.replace("_RESULTS = []\n", "_RESULTS = []\n" + helper_block, 1)
+
+        script = re.sub(
+            r"(\b\w+_id)\s*=\s*(\w+)\s*\[\s*['\"]id['\"]\s*\]",
+            r"\1 = _require_id(\2, '\2')",
+            script,
+        )
+
+        script = script.replace("os.remove(", "_safe_remove_file(")
+
+        def _inject_storage_dispose(match: re.Match) -> str:
+            indent = match.group(1)
+            db_var = match.group(2)
+            return (
+                f"{indent}_safe_dispose_storage(locals().get('storage'))\n"
+                f"{indent}if os.path.exists({db_var}):\n"
+                f"{indent}    _safe_remove_file({db_var})"
+            )
+
+        script = re.sub(
+            r"^(\s*)if\s+os\.path\.exists\(([^)]+)\):\n\1\s+_safe_remove_file\(\2\)",
+            _inject_storage_dispose,
+            script,
+            flags=re.MULTILINE,
+        )
+
+        return script
 
     @staticmethod
     def _attempt_syntax_repair(raw_tests: str, err: SyntaxError) -> Optional[str]:
@@ -309,14 +505,14 @@ class FeatureVerifier:
             test_funcs.append(
                 f'@feature_test("{feat}", importance="important")\n'
                 f"def test_{safe_name}_{i}():\n"
-                f'    """Skipped — test generation had syntax error."""\n'
-                f'    raise AssertionError("UNTESTED: test generation had syntax error — feature not verified")\n'
+                f'    """Skipped: test generation had syntax error."""\n'
+                f'    raise AssertionError("{FALLBACK_MARKER}: UNTESTED test generation syntax error - feature not verified")\n'
             )
         fallback_tests = "\n\n".join(test_funcs) if test_funcs else (
             '@feature_test("basic_import", importance="important")\n'
             "def test_basic():\n"
             '    """Fallback test."""\n'
-            '    raise AssertionError("UNTESTED: test generation had syntax error")\n'
+            f'    raise AssertionError("{FALLBACK_MARKER}: UNTESTED test generation syntax error")\n'
         )
         full = HARNESS_TEMPLATE + "\n" + fallback_tests + "\n\n"
         full += 'if __name__ == "__main__":\n    run_all_tests()\n'
@@ -495,6 +691,8 @@ class FeatureVerifier:
             python_exe=python_exe,
         )
 
+        report["test_generation_fallback"] = (FALLBACK_MARKER in test_script)
+
         # Attach the generated test script for debugging
         report["test_script"] = test_script
 
@@ -541,3 +739,26 @@ def create_feature_error_messages(report: Dict[str, Any]) -> List[str]:
                 f"Feature '{name}' {status.lower()}ed at runtime — {error_detail}"
             )
     return errors
+
+
+def is_generation_fallback_only_failure(report: Dict[str, Any]) -> bool:
+    """
+    True when all reported feature failures are from fallback tests that were
+    generated due to feature-test syntax issues, not from product behavior.
+    """
+    if not report.get("test_generation_fallback"):
+        return False
+
+    features = report.get("features", [])
+    if not features:
+        return False
+
+    for feat in features:
+        status = feat.get("status", "")
+        if status not in ("FAIL", "ERROR"):
+            return False
+        detail = (feat.get("error", "") + " " + feat.get("output", "")).strip()
+        if FALLBACK_MARKER not in detail:
+            return False
+
+    return True

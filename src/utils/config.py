@@ -77,32 +77,50 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     if config_path is None:
         config_path = Path(__file__).parent.parent.parent / "config.yaml"
     
+    config_path = Path(config_path)
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Configuration file not found: {config_path}\n"
+            f"Expected at: {config_path.resolve()}\n"
+            f"Copy config.yaml.example to config.yaml or set a custom path."
+        )
+    
     with open(config_path, 'r', encoding='utf-8') as f:
         yaml_config = yaml.safe_load(f)
     
     # Merge with environment variables (env vars take precedence)
     config = yaml_config.copy()
     
-    # Override with environment variables
-    env_overrides = {
-        'groq_api_key': os.getenv('GROQ_API_KEY'),
-        'github_token': os.getenv('GITHUB_TOKEN'),
-        'github_username': os.getenv('GITHUB_USERNAME'),
-        'primary_code_model': os.getenv('PRIMARY_CODE_MODEL'),
-        'analysis_model': os.getenv('ANALYSIS_MODEL'),
-        'local_code_model': os.getenv('LOCAL_CODE_MODEL'),
-        'local_analysis_model': os.getenv('LOCAL_ANALYSIS_MODEL'),
-        'embedding_model': os.getenv('EMBEDDING_MODEL'),
-        'novelty_threshold': float(os.getenv('NOVELTY_THRESHOLD', '7.0')),
-        'priority_threshold': float(os.getenv('PRIORITY_THRESHOLD', '0.5')),
-        'max_papers_per_run': int(os.getenv('MAX_PAPERS_PER_RUN', '5')),
-        'dry_run': os.getenv('DRY_RUN', 'true').lower() == 'true',
-        'log_level': os.getenv('LOG_LEVEL', 'INFO'),
-        'debug': os.getenv('DEBUG', 'false').lower() == 'true',
-    }
-    
-    # Remove None values
-    env_overrides = {k: v for k, v in env_overrides.items() if v is not None}
+    # Override with environment variables (only if explicitly set)
+    env_overrides = {}
+    if 'GROQ_API_KEY' in os.environ:
+        env_overrides['groq_api_key'] = os.environ['GROQ_API_KEY']
+    if 'GITHUB_TOKEN' in os.environ:
+        env_overrides['github_token'] = os.environ['GITHUB_TOKEN']
+    if 'GITHUB_USERNAME' in os.environ:
+        env_overrides['github_username'] = os.environ['GITHUB_USERNAME']
+    if 'PRIMARY_CODE_MODEL' in os.environ:
+        env_overrides['primary_code_model'] = os.environ['PRIMARY_CODE_MODEL']
+    if 'ANALYSIS_MODEL' in os.environ:
+        env_overrides['analysis_model'] = os.environ['ANALYSIS_MODEL']
+    if 'LOCAL_CODE_MODEL' in os.environ:
+        env_overrides['local_code_model'] = os.environ['LOCAL_CODE_MODEL']
+    if 'LOCAL_ANALYSIS_MODEL' in os.environ:
+        env_overrides['local_analysis_model'] = os.environ['LOCAL_ANALYSIS_MODEL']
+    if 'EMBEDDING_MODEL' in os.environ:
+        env_overrides['embedding_model'] = os.environ['EMBEDDING_MODEL']
+    if 'NOVELTY_THRESHOLD' in os.environ:
+        env_overrides['novelty_threshold'] = float(os.environ['NOVELTY_THRESHOLD'])
+    if 'PRIORITY_THRESHOLD' in os.environ:
+        env_overrides['priority_threshold'] = float(os.environ['PRIORITY_THRESHOLD'])
+    if 'MAX_PAPERS_PER_RUN' in os.environ:
+        env_overrides['max_papers_per_run'] = int(os.environ['MAX_PAPERS_PER_RUN'])
+    if 'DRY_RUN' in os.environ:
+        env_overrides['dry_run'] = os.environ['DRY_RUN'].lower() == 'true'
+    if 'LOG_LEVEL' in os.environ:
+        env_overrides['log_level'] = os.environ['LOG_LEVEL']
+    if 'DEBUG' in os.environ:
+        env_overrides['debug'] = os.environ['DEBUG'].lower() == 'true'
     
     # Update config with env overrides
     if 'pipeline' not in config:

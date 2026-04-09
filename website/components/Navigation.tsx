@@ -7,7 +7,8 @@ const navItems = [
   { name: 'Home', href: '#hero' },
   { name: 'Problem', href: '#problem' },
   { name: 'Pipeline', href: '#pipeline' },
-  { name: 'Models', href: '#model-showcase' },
+  { name: 'Models', href: '#model-management' },
+  { name: 'Benchmark', href: '#benchmark' },
   { name: 'Architecture', href: '#architecture' },
   { name: 'Demo', href: '#demo' },
 ];

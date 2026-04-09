@@ -107,8 +107,8 @@ class ExtensiveResearcher:
         self,
         searxng_url: str = "http://localhost:8888",
         hybrid_router: Optional[HybridRouter] = None,
-        max_iterations: int = 3,
-        results_per_query: int = 10,
+        max_iterations: int = 6,
+        results_per_query: int = 25,
         small_model_preference: List[str] = None
     ):
         """
@@ -249,11 +249,10 @@ Keep it concise and actionable."""
             try:
                 # Use small model for efficiency
                 result = await self.router.generate_with_fallback(
-                    prompt=prompt,
+                    messages=[{"role": "user", "content": prompt}],
                     max_tokens=300,
                     temperature=0.3,
                     task_type="general",  # Route to small model
-                    preferred_backend="openrouter"  # Use free tier
                 )
                 
                 analysis = result.content
@@ -608,11 +607,10 @@ Provide 5 concise findings (one sentence each):
 
         try:
             result = await self.router.generate_with_fallback(
-                prompt=prompt,
+                messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.3,
                 task_type="general",
-                preferred_backend="openrouter"
             )
             
             # Parse numbered findings

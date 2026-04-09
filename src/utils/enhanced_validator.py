@@ -108,8 +108,8 @@ class EnhancedValidator:
             results["security_score"] = security_score
             if security_score < 70:
                 results["passed"] = False
-                results["errors"].extend([f"Security: {i}" for i in security_issues if i['severity'] in ['HIGH', 'CRITICAL']])
-                results["warnings"].extend([f"Security: {i}" for i in security_issues if i['severity'] == 'MEDIUM'])
+                results["errors"].extend([f"Security: L{i['line']}: [{i['severity']}] {i['message']}" for i in security_issues if i['severity'] in ['HIGH', 'CRITICAL']])
+                results["warnings"].extend([f"Security: L{i['line']}: [{i['severity']}] {i['message']}" for i in security_issues if i['severity'] == 'MEDIUM'])
             
             # 4. Linting (ruff)
             lint_score, lint_issues = self._check_linting(temp_file)
@@ -308,6 +308,9 @@ class EnhancedValidator:
     
     def auto_fix_linting(self, code: str) -> str:
         """Auto-fix linting issues using ruff"""
+        ruff_exe = _find_executable('ruff')
+        if not ruff_exe:
+            return code
         try:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
                 f.write(code)
@@ -315,7 +318,7 @@ class EnhancedValidator:
             
             # Run ruff fix
             subprocess.run(
-                ['ruff', 'check', '--fix', temp_file],
+                [ruff_exe, 'check', '--fix', temp_file],
                 capture_output=True,
                 timeout=10
             )

@@ -3,7 +3,7 @@ Ollama Client - Production-grade wrapper for local model inference.
 """
 
 import asyncio
-from typing import Optional, Dict, Any, List, AsyncIterator
+from typing import Optional, Dict, Any, List, AsyncIterator, Union
 import ollama
 from ollama import AsyncClient
 from tenacity import (
@@ -69,7 +69,7 @@ class OllamaClient:
         stream: bool = False,
         timeout: Optional[int] = None,
         **kwargs
-    ) -> Dict[str, Any]:
+    ) -> Union[Dict[str, Any], AsyncIterator[str]]:
         """
         Generate completion from Ollama model.
 
@@ -79,12 +79,12 @@ class OllamaClient:
             system: System message (optional)
             temperature: Sampling temperature
             max_tokens: Max tokens to generate
-            stream: Enable streaming
+            stream: Enable streaming (returns AsyncIterator[str] when True)
             timeout: Request timeout in seconds (overrides default)
             **kwargs: Additional Ollama parameters
 
         Returns:
-            Response dict with content, model, tokens used
+            Dict when stream=False, AsyncIterator[str] when stream=True.
         """
         try:
             logger.debug(f"Generating with {model}: {prompt[:100]}...")

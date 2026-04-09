@@ -397,3 +397,43 @@ class ModelRouter:
                 recommendations[task_type.value] = [m[0] for m in models[:3]]
         
         return recommendations
+
+    def get_failover_chain(self, profile: str = "balanced") -> List[str]:
+        """Return deterministic model failover order for an ops profile."""
+        profile_name = (profile or "balanced").strip().lower()
+        chains: Dict[str, List[str]] = {
+            "balanced": ["qwen2.5-coder:7b", "qwen3:8b", "qwen3:4b", "qwen3:0.6b"],
+            "quality_first": ["qwen2.5-coder:7b", "deepseek-r1:8b", "qwen3:8b", "qwen3:4b"],
+            "latency_first": ["qwen3:0.6b", "qwen3:4b", "phi4-mini:3.8b", "qwen3:8b"],
+            "resilient": ["qwen3:8b", "qwen2.5-coder:7b", "phi4-mini:3.8b", "qwen3:4b", "qwen3:0.6b"],
+        }
+        selected = chains.get(profile_name, chains["balanced"])
+        # Keep only models available in this router registry.
+        return [m for m in selected if m in self.models]
+
+    def select_model_with_failover(
+        self,
+        task_type: TaskType,
+        *,
+        profile: str = "balanced",
+        unhealthy_models: Optional[List[str]] = None,
+    ) -> str:
+        """Select a model while honoring failover profile and unhealthy model set."""
+        unhealthy = set(unhealthy_models or [])
+        preferred = self.select_model(task_type)
+        if preferred not in unhealthy:
+            return preferred
+
+        chain = self.get_failover_chain(profile=profile)
+        for model_name in chain:
+            if model_name not in unhealthy:
+                logger.info(
+                    "Failover profile '%s' selected '%s' for task '%s'",
+                    profile,
+                    model_name,
+                    task_type.value,
+                )
+                return model_name
+
+        # Last-resort fallback if all profile models are unhealthy
+        return self._get_fallback_model()

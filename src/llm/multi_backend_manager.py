@@ -35,7 +35,7 @@ class ModelInfo:
     """Information about a specific model."""
     name: str
     task_types: List[str]
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     temperature: float = 0.7
 
 
@@ -118,7 +118,7 @@ class MultiBackendLLMManager:
                 models.append(ModelInfo(
                     name=model_config['name'],
                     task_types=model_config.get('task_types', []),
-                    max_tokens=model_config.get('max_tokens', 4096),
+                    max_tokens=model_config.get('max_tokens', 16384),
                     temperature=model_config.get('temperature', 0.7)
                 ))
             
@@ -139,7 +139,7 @@ class MultiBackendLLMManager:
                 self.clients[name] = AsyncOpenAI(
                     base_url=backend.endpoint,
                     api_key=backend.api_key or "dummy",
-                    timeout=60.0
+                    timeout=300.0
                 )
                 logger.info(f"Initialized client for backend: {name}")
             except Exception as e:
@@ -296,7 +296,7 @@ class MultiBackendLLMManager:
                 default_max_tokens = model_info.max_tokens
             else:
                 default_temp = 0.7
-                default_max_tokens = 4096
+                default_max_tokens = 16384
         
         # Use overrides if provided
         final_temp = temperature if temperature is not None else default_temp

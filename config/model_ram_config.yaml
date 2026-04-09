@@ -179,8 +179,8 @@ optimization:
   # Model loading strategy
   model_loading:
     strategy: "lazy"  # Load models on-demand
-    cache_models: false  # Don't keep models in memory
-    unload_after: 300  # Seconds of inactivity
+    cache_models: true  # Reuse built model clients to avoid reload thrash
+    unload_after: 1800  # Seconds of inactivity before optional cleanup
     
   # SearXNG optimization
   searxng:

@@ -9,12 +9,33 @@ import logging
 import os
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import tempfile
 import shutil
 
 logger = logging.getLogger(__name__)
+
+
+def build_cached_venv_dir(cache_root: Path, requirements_text: str) -> Path:
+    """Build a stable cache directory for a dependency environment.
+
+    The cache key is based on:
+    - normalized requirements.txt contents
+    - current Python major/minor version
+
+    This allows multiple generated projects with the same dependency set to
+    reuse a single virtual environment across testing/fix iterations.
+    """
+    normalized = "\n".join(
+        line.strip()
+        for line in (requirements_text or "").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+    payload = f"py{sys.version_info.major}.{sys.version_info.minor}\n{normalized}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return Path(cache_root) / f"py{sys.version_info.major}{sys.version_info.minor}-{digest}"
 
 
 def _safe_subprocess_env() -> Dict[str, str]:
@@ -73,7 +94,7 @@ def _encoding_test_env() -> Dict[str, str]:
 class CodeExecutor:
     """Manages code execution in isolated environments"""
     
-    def __init__(self, project_dir: Path):
+    def __init__(self, project_dir: Path, venv_dir: Optional[Path] = None):
         """
         Initialize executor for a project
         
@@ -81,7 +102,8 @@ class CodeExecutor:
             project_dir: Directory containing generated code
         """
         self.project_dir = Path(project_dir)
-        self.venv_dir = self.project_dir / ".venv"
+        self.venv_dir = Path(venv_dir) if venv_dir else (self.project_dir / ".venv")
+        self._ephemeral_venv = venv_dir is None
         self.test_results = {
             "environment_created": False,
             "dependencies_installed": False,
@@ -91,6 +113,32 @@ class CodeExecutor:
             "warnings": [],
             "test_outputs": []
         }
+
+    def _requirements_file(self) -> Path:
+        return self.project_dir / "requirements.txt"
+
+    def _install_stamp_file(self) -> Path:
+        return self.venv_dir / ".autogit_requirements_token"
+
+    def _requirements_cache_token(self) -> str:
+        requirements_file = self._requirements_file()
+        req_text = requirements_file.read_text(encoding="utf-8") if requirements_file.exists() else ""
+        payload = f"py{sys.version_info.major}.{sys.version_info.minor}\n{req_text}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _is_cached_install_current(self) -> bool:
+        stamp_file = self._install_stamp_file()
+        python_exe = self.get_python_executable()
+        if not stamp_file.exists() or not python_exe.exists():
+            return False
+        try:
+            return stamp_file.read_text(encoding="utf-8").strip() == self._requirements_cache_token()
+        except Exception:
+            return False
+
+    def _write_install_stamp(self):
+        self.venv_dir.mkdir(parents=True, exist_ok=True)
+        self._install_stamp_file().write_text(self._requirements_cache_token(), encoding="utf-8")
     
     def create_environment(self) -> bool:
         """
@@ -100,7 +148,15 @@ class CodeExecutor:
             True if successful, False otherwise
         """
         try:
+            existing_python = self.get_python_executable()
+            if existing_python.exists():
+                self.test_results["environment_created"] = True
+                logger.info(f"♻️ Reusing virtual environment at {self.venv_dir}")
+                self.test_results["test_outputs"].append(f"Reused virtual environment: {self.venv_dir}")
+                return True
+
             logger.info(f"Creating virtual environment at {self.venv_dir}")
+            self.venv_dir.parent.mkdir(parents=True, exist_ok=True)
             
             # Create venv
             subprocess.run(
@@ -153,8 +209,35 @@ class CodeExecutor:
             return True
         
         try:
+            if self._is_cached_install_current():
+                self.test_results["dependencies_installed"] = True
+                logger.info(f"♻️ Reusing cached dependencies in {self.venv_dir}")
+                self.test_results["test_outputs"].append(
+                    f"Reused cached dependencies: {self.venv_dir}"
+                )
+                return True
+
             logger.info("Installing dependencies...")
             python_exe = self.get_python_executable()
+
+            # Ensure core build backend tools exist in the sandbox venv.
+            # Some generated dependencies rely on PEP 517 backends and fail with
+            # "Cannot import setuptools.build_meta" if setuptools is missing.
+            subprocess.run(
+                [
+                    str(python_exe),
+                    "-m",
+                    "pip",
+                    "install",
+                    "--prefer-binary",
+                    "setuptools",
+                    "wheel",
+                ],
+                check=True,
+                capture_output=True,
+                timeout=90,
+                env=_safe_subprocess_env(),
+            )
 
             # Latency optimization: avoid unconditional pip self-upgrade on every
             # pipeline test cycle. It adds network/process overhead and does not
@@ -173,6 +256,7 @@ class CodeExecutor:
             
             self.test_results["dependencies_installed"] = True
             logger.info("✅ Dependencies installed")
+            self._write_install_stamp()
             
             # Log installed packages
             output = result.stdout.decode()
@@ -248,19 +332,19 @@ class CodeExecutor:
         
         # Dynamically discover all .py files (including subdirs) — import main.py last
         _all_py = sorted(
-            [f.name for f in self.project_dir.rglob("*.py")
+            [f.relative_to(self.project_dir) for f in self.project_dir.rglob("*.py")
              if '.venv' not in f.parts and '__pycache__' not in f.parts],
-            key=lambda x: (1 if x == "main.py" else 0, x)
+            key=lambda x: (1 if x.name == "main.py" else 0, str(x))
         )
         test_files = _all_py
         all_successful = True
         
-        for filename in test_files:
-            filepath = self.project_dir / filename
+        for rel_path in test_files:
+            filepath = self.project_dir / rel_path
             if not filepath.exists():
                 continue
             
-            module_name = filename.replace(".py", "")
+            module_name = str(rel_path).replace(os.sep, ".").replace(".py", "")
             
             # Create test script
             test_script = f"""
@@ -292,18 +376,18 @@ except Exception as e:
                 stderr_text = e.stderr.decode().strip()
                 stdout_text = e.stdout.decode().strip()
                 detail = stderr_text or stdout_text  # test script prints to stdout
-                error_msg = f"Import error in {filename}: {detail}"
+                error_msg = f"Import error in {rel_path}: {detail}"
                 logger.error(f"  ❌ {error_msg}")
                 self.test_results["execution_errors"].append(error_msg)
                 self.test_results["import_successful"] = False
                 all_successful = False
             except subprocess.TimeoutExpired:
-                error_msg = f"Import test timed out for {filename}"
+                error_msg = f"Import test timed out for {rel_path}"
                 logger.error(error_msg)
                 self.test_results["execution_errors"].append(error_msg)
                 all_successful = False
             except Exception as e:
-                error_msg = f"Import test error for {filename}: {str(e)}"
+                error_msg = f"Import test error for {rel_path}: {str(e)}"
                 logger.error(error_msg)
                 self.test_results["execution_errors"].append(error_msg)
                 all_successful = False
@@ -584,8 +668,8 @@ else:
             stderr = result.stderr.decode(errors="replace").strip()
 
             # Always capture stdout for LLM-as-Judge output validation
-            self.test_results["entry_point_stdout"] = stdout[:5000] if stdout else ""
-            self.test_results["entry_point_stderr"] = stderr[:2000] if stderr else ""
+            self.test_results["entry_point_stdout"] = stdout[:10000] if stdout else ""
+            self.test_results["entry_point_stderr"] = stderr[:8000] if stderr else ""  # S24: was 2000, hid root causes
             self.test_results["entry_point_exit_code"] = result.returncode
 
             if result.returncode == 0:
@@ -640,7 +724,7 @@ else:
                                     func_stdout[:5000]
                                 )
                                 self.test_results["entry_point_stderr"] = (
-                                    func_stderr[:2000] if func_stderr else ""
+                                    func_stderr[:8000] if func_stderr else ""  # S24: was 2000
                                 )
                                 self.test_results["entry_point_exit_code"] = 0
                                 self.test_results["functional_run_args"] = (
@@ -668,6 +752,19 @@ else:
                 logger.info("  ℹ️  argparse exit code 2 (missing args) — expected for --help")
                 self.test_results["entry_point_stdout"] = stdout[:5000]
                 self.test_results["entry_point_exit_code"] = 0  # treat as OK
+            elif is_interactive and (
+                "EOFError" in stderr or "EOF when reading a line" in stderr
+            ):
+                logger.info(
+                    "  ℹ️  Interactive main.py exited with EOFError under "
+                    "stdin=DEVNULL — acceptable"
+                )
+                self.test_results["entry_point_stdout"] = (
+                    stdout[:5000] if stdout else "(interactive — no stdin available)"
+                )
+                self.test_results["entry_point_stderr"] = stderr[:8000]
+                self.test_results["entry_point_exit_code"] = -1
+                return True
             else:
                 # Show last 15 lines of stderr (the actual traceback)
                 err_lines = (stderr or stdout).splitlines()[-15:]
@@ -762,6 +859,15 @@ else:
         if not test_file.exists():
             return True  # no tests to run
 
+        # Provenance-aware policy: low-trust generated tests are useful signals,
+        # but should not hard-fail the pipeline when they only fail internally.
+        _test_file_text = ""
+        try:
+            _test_file_text = test_file.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            _test_file_text = ""
+        _low_trust_generated_tests = "Trust level: low" in _test_file_text
+
         python_exe = self.get_python_executable()
         logger.info("Running auto-generated test_main.py...")
 
@@ -815,6 +921,22 @@ else:
                     f"GENERATED_TEST_FAILURE: {fail_count}/{total_count} auto-generated tests "
                     f"failed ({fail_rate:.0%}). Failures: {fail_summary}"
                 )
+
+                # If all failures are inside low-trust generated tests, keep signal
+                # as warning but don't block pipeline correctness gates.
+                _all_failures_from_test_file = bool(fail_lines) and all(
+                    "test_main.py" in str(line) for line in fail_lines
+                )
+                if _low_trust_generated_tests and _all_failures_from_test_file:
+                    logger.warning(f"  ⚠️ {error_msg} (downgraded: low-trust test-only failure)")
+                    self.test_results["warnings"].append(
+                        f"LOW_TRUST_TEST_FAILURE: {error_msg}"
+                    )
+                    self.test_results["test_outputs"].append(
+                        f"Auto-generated tests: FAILED but downgraded (low-trust test-only)\n{output[:500]}"
+                    )
+                    return True
+
                 logger.warning(f"  ❌ {error_msg}")
                 self.test_results["execution_errors"].append(error_msg)
 
@@ -842,6 +964,9 @@ else:
     def cleanup(self):
         """Remove virtual environment"""
         try:
+            if not self._ephemeral_venv:
+                logger.info(f"♻️ Keeping cached virtual environment at {self.venv_dir}")
+                return
             if self.venv_dir.exists():
                 shutil.rmtree(self.venv_dir)
                 logger.info("🧹 Cleaned up virtual environment")

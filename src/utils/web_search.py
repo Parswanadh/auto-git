@@ -104,9 +104,10 @@ class MultiEngineSearcher:
         if self.tavily_api_key and HAS_TAVILY:
             self.available_engines.append(SearchEngine.TAVILY)
             logger.info("✓ Tavily API available")
-        if self.brave_api_key:
-            self.available_engines.append(SearchEngine.BRAVE)
-            logger.info("✓ Brave Search API available")
+        # TODO: Implement _search_brave() method, then re-enable
+        # if self.brave_api_key:
+        #     self.available_engines.append(SearchEngine.BRAVE)
+        #     logger.info("✓ Brave Search API available")
         if HAS_DUCKDUCKGO:
             self.available_engines.append(SearchEngine.DUCKDUCKGO)
             logger.info("✓ DuckDuckGo available (free, unlimited)")
@@ -248,6 +249,47 @@ class ArxivSearcher:
     def __init__(self, max_results: int = 5):
         self.max_results = max_results
     
+    @staticmethod
+    def _extract_keywords(raw_query: str, max_keywords: int = 8) -> str:
+        """Extract search-friendly keywords from a long idea/topic string.
+
+        arXiv's API chokes on full sentences (HTTP 500 for very long queries).
+        This extracts the most relevant technical terms and joins them with AND.
+        """
+        import re as _re
+
+        # Common English stop-words (no external dependency needed)
+        _STOP = frozenset(
+            "a an the and or but in on at to for of is it that this with from by "
+            "as be are was were been can could will would should may might do does "
+            "did have has had not no so if then than also very just about more most "
+            "how what when where which who whom why each every both few many much "
+            "some any all into over after before between through during without "
+            "using create build implement design develop make generate system tool "
+            "use used uses new based i we you they our".split()
+        )
+
+        # 1. Remove markdown / special chars, keep alphanumeric and hyphens
+        text = _re.sub(r"[^a-zA-Z0-9\-\s]", " ", raw_query)
+
+        # 2. Tokenise and filter
+        tokens = [t.strip("-") for t in text.lower().split() if len(t) > 2]
+        keywords = [t for t in tokens if t not in _STOP]
+
+        # 3. Deduplicate while preserving order
+        seen: set = set()
+        unique: list = []
+        for kw in keywords:
+            if kw not in seen:
+                seen.add(kw)
+                unique.append(kw)
+
+        # 4. Prefer multi-word technical phrases when present
+        selected = unique[:max_keywords] if unique else tokens[:max_keywords]
+
+        result = " AND ".join(selected) if selected else raw_query[:120]
+        return result
+
     def search(self, query: str, max_results: Optional[int] = None) -> List[Dict]:
         """
         Search arXiv for papers
@@ -267,9 +309,14 @@ class ArxivSearcher:
             return []
         
         try:
-            logger.info(f"Starting arXiv search for: {query}")
+            # FIX S21: Extract keywords from long idea strings — arXiv returns
+            # HTTP 500 when the query is a full paragraph/sentence.
+            _clean_query = self._extract_keywords(query) if len(query) > 120 else query
+            logger.info(f"Starting arXiv search for: {_clean_query}")
+            if _clean_query != query:
+                logger.debug(f"  (original query was {len(query)} chars, trimmed to keywords)")
             search = arxiv.Search(
-                query=query,
+                query=_clean_query,
                 max_results=max_results,
                 sort_by=arxiv.SortCriterion.Relevance
             )
@@ -436,8 +483,8 @@ class ResearchSearcher:
         formatted = "## Web Search Results\n\n"
         for i, result in enumerate(results, 1):
             formatted += f"{i}. **{result.get('title', 'No title')}**\n"
-            formatted += f"   - URL: {result.get('href', 'N/A')}\n"
-            formatted += f"   - Snippet: {result.get('body', 'No description')[:200]}...\n\n"
+            formatted += f"   - URL: {result.get('url', result.get('href', 'N/A'))}\n"
+            formatted += f"   - Snippet: {result.get('content', result.get('body', 'No description'))[:200]}...\n\n"
         
         return formatted
 

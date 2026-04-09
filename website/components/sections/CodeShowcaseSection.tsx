@@ -2,6 +2,7 @@
 
 import { motion, useInView } from 'framer-motion';
 import { useRef, useState } from 'react';
+import { evidenceMetrics } from '@/data/evidenceMetrics';
 
 const tabs = [
   {
@@ -36,7 +37,7 @@ const tabs = [
     Append-only JSONL ledger. Before generating code, the system
     reads its past mistakes and injects them as warnings.
     
-    233 errors recorded across 27 runs — the system genuinely
+    ${evidenceMetrics.errorMemoryEntries.value} entries tracked in the ledger — the system genuinely
     improves over time.
     """
     

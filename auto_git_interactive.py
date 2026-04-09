@@ -253,54 +253,56 @@ def parse_intent(user_input: str) -> tuple[str, str]:
     Returns:
         (command, topic) tuple
     """
-    user_input = user_input.strip().lower()
+    user_input = user_input.strip()
+    user_input_lower = user_input.lower()
     
     # Direct commands
-    if user_input in ["help", "h", "?"]:
+    if user_input_lower in ["help", "h", "?"]:
         return ("help", "")
-    elif user_input in ["status", "check"]:
+    elif user_input_lower in ["status", "check"]:
         return ("status", "")
-    elif user_input in ["config", "configure", "settings"]:
+    elif user_input_lower in ["config", "configure", "settings"]:
         return ("config", "")
-    elif user_input in ["exit", "quit", "q", "bye"]:
+    elif user_input_lower in ["exit", "quit", "q", "bye"]:
         return ("exit", "")
-    elif user_input == "clear":
+    elif user_input_lower == "clear":
         return ("clear", "")
     
     # Command-style inputs
-    if user_input.startswith("generate "):
-        return ("generate", user_input.replace("generate ", "").strip())
-    elif user_input.startswith("research "):
-        return ("research", user_input.replace("research ", "").strip())
-    elif user_input.startswith("debate "):
-        return ("debate", user_input.replace("debate ", "").strip())
+    if user_input_lower.startswith("generate "):
+        return ("generate", user_input[len("generate "):].strip())
+    elif user_input_lower.startswith("research "):
+        return ("research", user_input[len("research "):].strip())
+    elif user_input_lower.startswith("debate "):
+        return ("debate", user_input[len("debate "):].strip())
     
     # Natural language detection
     generate_keywords = ["generate", "create", "build", "implement", "code for", "make"]
     research_keywords = ["research", "find", "search", "look for", "papers on", "papers about"]
     debate_keywords = ["debate", "discuss", "analyze", "evaluate", "compare approaches"]
     
-    input_lower = user_input.lower()
-    
-    if any(keyword in input_lower for keyword in generate_keywords):
-        # Extract topic by removing trigger words
+    if any(keyword in user_input_lower for keyword in generate_keywords):
+        # Extract topic by removing trigger words (case-insensitive)
         topic = user_input
         for keyword in generate_keywords:
-            topic = topic.replace(keyword, "").strip()
+            import re
+            topic = re.sub(re.escape(keyword), "", topic, flags=re.IGNORECASE).strip()
         topic = topic.replace("?", "").strip()
         return ("generate", topic)
     
-    elif any(keyword in input_lower for keyword in research_keywords):
+    elif any(keyword in user_input_lower for keyword in research_keywords):
         topic = user_input
         for keyword in research_keywords:
-            topic = topic.replace(keyword, "").strip()
+            import re
+            topic = re.sub(re.escape(keyword), "", topic, flags=re.IGNORECASE).strip()
         topic = topic.replace("?", "").strip()
         return ("research", topic)
     
-    elif any(keyword in input_lower for keyword in debate_keywords):
+    elif any(keyword in user_input_lower for keyword in debate_keywords):
         topic = user_input
         for keyword in debate_keywords:
-            topic = topic.replace(keyword, "").strip()
+            import re
+            topic = re.sub(re.escape(keyword), "", topic, flags=re.IGNORECASE).strip()
         topic = topic.replace("?", "").strip()
         return ("debate", topic)
     
@@ -763,7 +765,10 @@ async def handle_research(topic: str):
     
     with console.status("[cyan]Searching arXiv and web...", spinner="dots"):
         searcher = ResearchSearcher()
-        papers, web_results, implementations = searcher.search_comprehensive(topic, max_results=5)
+        result = searcher.search_comprehensive(topic)
+        papers = result.get("papers", [])
+        web_results = result.get("web_results", [])
+        implementations = result.get("implementations", [])
     
     # Display papers
     if papers:

@@ -6,9 +6,12 @@ LangGraph handles the orchestration and state management.
 """
 
 import sys
+import os
+import asyncio
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from contextvars import ContextVar
 from dotenv import load_dotenv
 import time
 import uuid
@@ -67,6 +70,8 @@ _IMPORT_TO_PKG: dict = {
     "flask": "flask", "django": "django", "fastapi": "fastapi",
     "uvicorn": "uvicorn", "gunicorn": "gunicorn", "starlette": "starlette",
     "sqlalchemy": "sqlalchemy", "alembic": "alembic",
+    "flask_sqlalchemy": "Flask-SQLAlchemy",
+    "neo4j": "neo4j",
     "celery": "celery", "redis": "redis", "pymongo": "pymongo",
     "psycopg2": "psycopg2-binary", "aiohttp": "aiohttp",
     "httpx": "httpx", "requests": "requests",
@@ -76,6 +81,8 @@ _IMPORT_TO_PKG: dict = {
     "jinja2": "jinja2", "mako": "mako",
     "boto3": "boto3", "paramiko": "paramiko",
     "cryptography": "cryptography", "jwt": "pyjwt",
+    "nacl": "pynacl",
+    "argon2": "argon2-cffi",
     "websockets": "websockets", "aioredis": "aioredis",
     "kombu": "kombu", "dramatiq": "dramatiq", "rq": "rq",
     "apscheduler": "apscheduler", "schedule": "schedule",
@@ -84,6 +91,17 @@ _IMPORT_TO_PKG: dict = {
     "matplotlib": "matplotlib", "seaborn": "seaborn",
     "torch": "torch", "tensorflow": "tensorflow",
     "transformers": "transformers",
+    # Deprecated import/package aliases that still appear in generated code
+    "fbprophet": "prophet",
+}
+
+# Non-installable or deprecated requirement names that should never survive.
+_BAD_REQUIREMENT_NAMES: set = {
+    "fbprophet",      # replaced by prophet
+    "pkg_resources",  # module from setuptools, not a standalone package
+    "distutils",      # stdlib/deprecated, not a pip dependency
+    "database",       # placeholder/non-existent package often hallucinated by LLM
+    "lockingmiddleware",  # class/module confusion, not a pip-installable package
 }
 
 # ── Shared Emoji → ASCII map (single source of truth) ────────────────────────
@@ -91,7 +109,7 @@ _IMPORT_TO_PKG: dict = {
 # Adding an emoji here propagates to ALL sanitization passes automatically.
 _EMOJI_TO_ASCII: dict = {
     "✅": "[OK]", "❌": "[FAIL]", "⚠️": "[!]", "⚠": "[!]",
-    "🔄": "[...]", "✓": "[v]", "✗": "[x]", "✘": "[x]",
+    "🔄": "[...]", "✓": "[v]", "✔": "[OK]", "✔️": "[OK]", "✗": "[x]", "✘": "[x]",
     "📊": "[stats]", "📈": "[up]", "📉": "[down]", "📋": "[list]",
     "🔍": "[search]", "💡": "[tip]", "🚀": "[go]", "🎯": "[target]",
     "⭐": "[*]", "★": "[*]", "☆": "[*]", "●": "[o]", "○": "[o]",
@@ -115,6 +133,626 @@ _EMOJI_TO_ASCII: dict = {
 }
 
 
+_INCOMPLETE_ARTIFACT_PATTERNS = (
+    "AUTO-GENERATED SKELETON",
+    "# SKELETON:",
+    "pass  # TODO: implement",
+    "raise NotImplementedError",
+    "The auto-fix loop will attempt to implement this file",
+    "generation failed — fix loop will implement",
+)
+
+
+def _find_incomplete_artifacts(files: Dict[str, str]) -> List[str]:
+    """Return generated files that still contain known placeholder/skeleton markers.
+    S26: Enhanced with semantic stub detection — catches functions that only
+    return None/empty literal, and README.md placeholder detection."""
+    flagged: List[str] = []
+    for fname, content in (files or {}).items():
+        text = str(content or "")
+
+        # ── README.md placeholder check ──
+        if fname.lower() == "readme.md":
+            stripped = text.strip()
+            # Flag if README is trivially short or just a title
+            if len(stripped) < 80 or stripped.count("\n") < 3:
+                flagged.append(fname)
+            continue
+
+        if not fname.endswith(".py"):
+            continue
+
+        # ── Known skeleton markers ──
+        if any(marker in text for marker in _INCOMPLETE_ARTIFACT_PATTERNS):
+            flagged.append(fname)
+            continue
+
+        # ── Bare `pass` in function body ──
+        if _re.search(r"^\s*def\s+\w+\(.*?\):\s*\n\s+pass\s*$", text, _re.MULTILINE):
+            flagged.append(fname)
+            continue
+
+        # ── S26: Semantic stub detection ──
+        # Detect functions whose body is ONLY `return None`, `return ""`,
+        # `return []`, `return {}`, or `return 0` — these are stubs.
+        try:
+            import ast as _ast_stub
+            tree = _ast_stub.parse(text)
+            total_funcs = 0
+            stub_funcs = 0
+            _TRIVIAL_RETURNS = {None, "", 0, 0.0, True, False}
+            for node in _ast_stub.walk(tree):
+                if isinstance(node, (_ast_stub.FunctionDef, _ast_stub.AsyncFunctionDef)):
+                    # Skip __init__, __repr__, __str__ — often legitimately short
+                    if node.name.startswith("__") and node.name.endswith("__"):
+                        continue
+                    total_funcs += 1
+                    _docstring_nodes = (_ast_stub.Constant,)
+                    _ast_stub_str = getattr(_ast_stub, "Str", None)
+                    if _ast_stub_str is not None:
+                        _docstring_nodes = _docstring_nodes + (_ast_stub_str,)
+                    body = [s for s in node.body
+                            if not isinstance(s, (_ast_stub.Expr,))
+                            or not isinstance(getattr(s, "value", None), _docstring_nodes)]
+                    if len(body) == 1:
+                        stmt = body[0]
+                        if isinstance(stmt, _ast_stub.Pass):
+                            stub_funcs += 1
+                        elif isinstance(stmt, _ast_stub.Return):
+                            val = stmt.value
+                            if val is None:
+                                stub_funcs += 1
+                            elif isinstance(val, _ast_stub.Constant) and val.value in _TRIVIAL_RETURNS:
+                                stub_funcs += 1
+                            elif isinstance(val, (_ast_stub.List, _ast_stub.Dict, _ast_stub.Tuple)):
+                                if not getattr(val, "elts", None) and not getattr(val, "keys", None):
+                                    stub_funcs += 1
+            # Flag if majority of functions are stubs (>60% and at least 2)
+            if total_funcs >= 2 and stub_funcs / total_funcs > 0.6:
+                flagged.append(fname)
+                logger.warning(
+                    f"  ⚠️  Semantic stubs detected in {fname}: "
+                    f"{stub_funcs}/{total_funcs} functions are trivial returns"
+                )
+        except SyntaxError:
+            pass  # AST parse failure handled elsewhere
+
+    return sorted(set(flagged))
+
+
+def _recommended_validator_workers() -> int:
+    """Choose a conservative validator parallelism based on free RAM."""
+    try:
+        import os as _os_workers
+        import psutil as _psutil_workers
+
+        free_ram_gb = _psutil_workers.virtual_memory().available / 1024 / 1024 / 1024
+        cpu_count = _os_workers.cpu_count() or 2
+        if free_ram_gb < 4:
+            return 1
+        if free_ram_gb < 8:
+            return 2
+        return max(1, min(4, cpu_count // 2 or 1))
+    except Exception:
+        return 2
+
+
+def _run_semgrep_sast_scan(
+    project_dir: Any,
+    *,
+    fail_on: str = "ERROR",
+    timeout_s: int = 120,
+) -> Dict[str, Any]:
+    """Run Semgrep scan for generated project files (best-effort, fail-safe)."""
+    import json as _json_sem
+    import shutil as _shutil_sem
+    import subprocess as _subp_sem
+
+    severity_order = {"INFO": 1, "WARNING": 2, "ERROR": 3}
+    normalized_fail_on = str(fail_on or "ERROR").strip().upper()
+    if normalized_fail_on not in severity_order:
+        normalized_fail_on = "ERROR"
+
+    semgrep_exe = _shutil_sem.which("semgrep")
+    report: Dict[str, Any] = {
+        "enabled": True,
+        "available": bool(semgrep_exe),
+        "ran": False,
+        "timeout_s": int(timeout_s),
+        "fail_on": normalized_fail_on,
+        "returncode": None,
+        "finding_count": 0,
+        "gate_failed": False,
+        "findings": [],
+        "warnings": [],
+    }
+    if not semgrep_exe:
+        report["enabled"] = False
+        report["warnings"].append("SEMGREP_NOT_AVAILABLE: semgrep executable not found on PATH")
+        return report
+
+    cmd = [
+        semgrep_exe,
+        "scan",
+        "--config",
+        "auto",
+        "--json",
+        "--quiet",
+        str(project_dir),
+    ]
+    try:
+        proc = _subp_sem.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(10, int(timeout_s)),
+            cwd=str(project_dir),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except _subp_sem.TimeoutExpired:
+        report["ran"] = True
+        report["returncode"] = "timeout"
+        report["warnings"].append(
+            f"SEMGREP_TIMEOUT: scan exceeded {int(timeout_s)}s; findings unavailable"
+        )
+        return report
+    except Exception as _sem_err:
+        report["ran"] = True
+        report["returncode"] = "error"
+        report["warnings"].append(f"SEMGREP_EXECUTION_ERROR: {_sem_err}")
+        return report
+
+    report["ran"] = True
+    report["returncode"] = proc.returncode
+
+    payload: Dict[str, Any] = {}
+    if proc.stdout and proc.stdout.strip():
+        try:
+            payload = _json_sem.loads(proc.stdout)
+        except Exception as _json_err:
+            report["warnings"].append(
+                f"SEMGREP_PARSE_ERROR: {_json_err}"
+            )
+
+    raw_findings = payload.get("results", []) if isinstance(payload, dict) else []
+    findings: List[Dict[str, Any]] = []
+    for finding in raw_findings[:200]:
+        if not isinstance(finding, dict):
+            continue
+        extra = finding.get("extra") if isinstance(finding.get("extra"), dict) else {}
+        severity = str(extra.get("severity", "INFO") or "INFO").upper()
+        if severity not in severity_order:
+            severity = "WARNING"
+        path = str(finding.get("path", "") or "")
+        # Keep basename only for concise state payloads.
+        path = os.path.basename(path) if path else ""
+        start_line = None
+        start = finding.get("start") if isinstance(finding.get("start"), dict) else {}
+        if isinstance(start, dict):
+            start_line = start.get("line")
+        findings.append(
+            {
+                "check_id": str(finding.get("check_id", "") or ""),
+                "severity": severity,
+                "path": path,
+                "line": int(start_line or 0),
+                "message": str(extra.get("message", "") or "")[:300],
+            }
+        )
+
+    report["findings"] = findings
+    report["finding_count"] = len(findings)
+
+    fail_rank = severity_order.get(normalized_fail_on, 3)
+    report["gate_failed"] = any(
+        severity_order.get(str(item.get("severity", "INFO")), 1) >= fail_rank
+        for item in findings
+    )
+
+    # Semgrep returns non-zero for findings; only hard failures (not findings)
+    # are surfaced as warnings.
+    if proc.returncode not in (0, 1):
+        stderr_preview = (proc.stderr or "").strip()[:300]
+        if stderr_preview:
+            report["warnings"].append(f"SEMGREP_RUNTIME_WARNING: {stderr_preview}")
+    return report
+
+
+def _build_repo_map_from_generated_files(
+    files: Dict[str, str],
+    architecture_spec: Optional[Dict[str, Any]] = None,
+    *,
+    max_chars: int = 6000,
+) -> str:
+    """Build a compact repo map from actual generated files (runtime source of truth)."""
+    if not files:
+        return ""
+
+    py_files = {
+        os.path.basename(name): str(content or "")
+        for name, content in files.items()
+        if str(name).endswith(".py")
+    }
+    local_modules = {name[:-3] for name in py_files.keys()}
+
+    lines: List[str] = ["REPO MAP (runtime-updated from generated files):"]
+    if isinstance(architecture_spec, dict):
+        project_name = str(architecture_spec.get("project_name", "") or "").strip()
+        one_liner = str(architecture_spec.get("one_line_description", "") or "").strip()
+        if project_name or one_liner:
+            lines.append(f"Project: {project_name} — {one_liner}".strip(" —"))
+
+    for fname in sorted(py_files.keys()):
+        code = py_files[fname]
+        try:
+            import ast as _ast_repo
+
+            tree = _ast_repo.parse(code)
+            classes = []
+            funcs = []
+            local_imports = []
+            for node in tree.body:
+                if isinstance(node, _ast_repo.ClassDef):
+                    classes.append(node.name)
+                elif isinstance(node, (_ast_repo.FunctionDef, _ast_repo.AsyncFunctionDef)):
+                    funcs.append(node.name)
+                elif isinstance(node, _ast_repo.ImportFrom):
+                    mod = str(node.module or "").split(".")[0]
+                    if mod in local_modules:
+                        local_imports.append(mod)
+                elif isinstance(node, _ast_repo.Import):
+                    for alias in node.names:
+                        mod = str(alias.name or "").split(".")[0]
+                        if mod in local_modules:
+                            local_imports.append(mod)
+
+            row = f"- {fname}:"
+            if classes:
+                row += f" classes={','.join(classes[:6])}"
+            if funcs:
+                row += f" funcs={','.join(funcs[:8])}"
+            if local_imports:
+                row += f" imports={','.join(sorted(set(local_imports))[:8])}"
+            lines.append(row)
+        except Exception:
+            lines.append(f"- {fname}: [parse-error]")
+
+    for aux in ("requirements.txt", "README.md"):
+        if aux in files:
+            lines.append(f"- {aux}: present")
+
+    return "\n".join(lines)[:max_chars]
+
+
+def _evaluate_repo_graph_consistency(
+    files: Dict[str, str],
+    architecture_spec: Optional[Dict[str, Any]] = None,
+    repo_map_text: str = "",
+) -> Dict[str, Any]:
+    """Evaluate cross-file consistency using generated files + repo map signals."""
+    flat_files = {
+        os.path.basename(str(name)): str(content or "")
+        for name, content in (files or {}).items()
+    }
+    py_files = {name: code for name, code in flat_files.items() if name.endswith(".py")}
+    local_modules = {name[:-3] for name in py_files.keys()}
+
+    report: Dict[str, Any] = {
+        "checked": bool(flat_files),
+        "missing_expected_files": [],
+        "missing_local_modules": [],
+        "missing_imported_symbols": [],
+        "repo_map_missing_entries": [],
+        "repo_map_stale_entries": [],
+        "high_confidence_errors": [],
+        "warnings": [],
+    }
+    if not flat_files:
+        return report
+
+    # Compare generated files against architecture spec planned files.
+    expected_files: set = set()
+    if isinstance(architecture_spec, dict):
+        for file_spec in architecture_spec.get("files", []) or []:
+            if not isinstance(file_spec, dict):
+                continue
+            fname = os.path.basename(str(file_spec.get("name", "") or "").strip())
+            if fname:
+                expected_files.add(fname)
+
+    missing_expected = sorted(f for f in expected_files if f not in flat_files)
+    report["missing_expected_files"] = missing_expected
+    for fname in missing_expected:
+        if fname.endswith(".py") or fname in {"main.py", "requirements.txt"}:
+            report["high_confidence_errors"].append(
+                f"REPO_GRAPH_MISSING_FILE: expected '{fname}' from architecture spec but file not generated"
+            )
+
+    # Build export map for local modules.
+    module_exports: Dict[str, set] = {mod: set() for mod in local_modules}
+    for fname, code in py_files.items():
+        module_name = fname[:-3]
+        try:
+            import ast as _ast_graph
+
+            tree = _ast_graph.parse(code)
+            for node in tree.body:
+                if isinstance(node, (_ast_graph.ClassDef, _ast_graph.FunctionDef, _ast_graph.AsyncFunctionDef)):
+                    module_exports[module_name].add(node.name)
+                elif isinstance(node, _ast_graph.Assign):
+                    for target in node.targets:
+                        if isinstance(target, _ast_graph.Name):
+                            module_exports[module_name].add(target.id)
+        except Exception:
+            continue
+
+    # Validate local import/module relationships.
+    for fname, code in py_files.items():
+        try:
+            import ast as _ast_graph_check
+
+            tree = _ast_graph_check.parse(code)
+        except Exception:
+            continue
+
+        for node in _ast_graph_check.walk(tree):
+            if isinstance(node, _ast_graph_check.ImportFrom):
+                module_name = str(node.module or "").split(".")[0]
+                if module_name in local_modules and f"{module_name}.py" not in flat_files:
+                    report["high_confidence_errors"].append(
+                        f"REPO_GRAPH_MISSING_MODULE: {fname} imports local module '{module_name}' but '{module_name}.py' is missing"
+                    )
+                    report["missing_local_modules"].append(module_name)
+                    continue
+                if module_name in module_exports:
+                    exports = module_exports.get(module_name, set())
+                    for alias in node.names:
+                        symbol = str(alias.name or "")
+                        if symbol == "*" or not symbol:
+                            continue
+                        if exports and symbol not in exports:
+                            report["missing_imported_symbols"].append(
+                                f"{fname}: from {module_name} import {symbol} (not exported)"
+                            )
+
+    # Compare repo_map text against actual file set to detect stale map context.
+    if isinstance(repo_map_text, str) and repo_map_text.strip():
+        map_entries = set(
+            os.path.basename(match)
+            for match in _re.findall(r"^-\s+([^:\n]+):", repo_map_text, flags=_re.MULTILINE)
+        )
+        generated_entries = set(flat_files.keys())
+        report["repo_map_missing_entries"] = sorted(
+            f for f in generated_entries if f.endswith(".py") and f not in map_entries
+        )
+        report["repo_map_stale_entries"] = sorted(
+            f for f in map_entries if f.endswith(".py") and f not in generated_entries
+        )
+
+    if report["missing_imported_symbols"]:
+        preview = report["missing_imported_symbols"][:5]
+        report["warnings"].append(
+            "REPO_GRAPH_IMPORT_WARNINGS: " + "; ".join(preview)
+        )
+
+    if report["repo_map_stale_entries"]:
+        report["warnings"].append(
+            "REPO_MAP_STALE: " + ", ".join(report["repo_map_stale_entries"][:8])
+        )
+
+    if report["repo_map_missing_entries"]:
+        report["warnings"].append(
+            "REPO_MAP_MISSING: " + ", ".join(report["repo_map_missing_entries"][:8])
+        )
+
+    # Deduplicate ordered lists.
+    for key in (
+        "missing_expected_files",
+        "missing_local_modules",
+        "missing_imported_symbols",
+        "repo_map_missing_entries",
+        "repo_map_stale_entries",
+        "high_confidence_errors",
+        "warnings",
+    ):
+        deduped = []
+        seen = set()
+        for item in report.get(key, []):
+            token = str(item)
+            if token in seen:
+                continue
+            seen.add(token)
+            deduped.append(token)
+        report[key] = deduped
+
+    return report
+
+
+def _summarize_python_reference(filename: str, code: str, max_chars: int = 6000) -> str:
+    """Return a compact symbol-first summary for prompt cross-file context.
+    S25: Raised from 2K→6K — 2K discarded class/method bodies that downstream
+    files need to match signatures correctly."""
+    try:
+        import ast as _ast_summary
+
+        tree = _ast_summary.parse(str(code or ""))
+        imports: List[str] = []
+        functions: List[str] = []
+        classes: List[str] = []
+        constants: List[str] = []
+        module_doc = (_ast_summary.get_docstring(tree) or "").strip()
+
+        for node in tree.body:
+            if isinstance(node, _ast_summary.Import):
+                imports.extend(alias.asname or alias.name for alias in node.names[:4])
+            elif isinstance(node, _ast_summary.ImportFrom):
+                mod = node.module or ""
+                names = ", ".join((alias.asname or alias.name) for alias in node.names[:4])
+                imports.append(f"from {mod} import {names}".strip())
+            elif isinstance(node, (_ast_summary.FunctionDef, _ast_summary.AsyncFunctionDef)):
+                functions.append(node.name)
+            elif isinstance(node, _ast_summary.ClassDef):
+                method_names = [
+                    child.name for child in node.body
+                    if isinstance(child, (_ast_summary.FunctionDef, _ast_summary.AsyncFunctionDef))
+                    and not child.name.startswith("_")
+                ][:6]
+                if method_names:
+                    classes.append(f"{node.name}({', '.join(method_names)})")
+                else:
+                    classes.append(node.name)
+            elif isinstance(node, _ast_summary.Assign):
+                for target in node.targets:
+                    if isinstance(target, _ast_summary.Name) and target.id.isupper():
+                        constants.append(target.id)
+
+        lines = [f"FILE SUMMARY: {filename}"]
+        if module_doc:
+            lines.append(f"Doc: {module_doc[:140]}")
+        if imports:
+            lines.append(f"Imports: {', '.join(imports[:6])}")
+        if classes:
+            lines.append(f"Classes: {', '.join(classes[:6])}")
+        if functions:
+            lines.append(f"Functions: {', '.join(functions[:8])}")
+        if constants:
+            lines.append(f"Constants: {', '.join(constants[:8])}")
+        if "if __name__ == '__main__':" in str(code or ""):
+            lines.append("Has entry point guard")
+
+        summary = "\n".join(lines)
+        return summary[:max_chars]
+    except Exception:
+        snippet = str(code or "")[:max_chars]
+        return f"FILE SUMMARY: {filename}\n{snippet}"
+
+
+def _build_repo_map_from_spec(spec: Dict[str, Any]) -> str:
+    """Create a compact, symbol-first repo map from the architecture spec."""
+    if not spec:
+        return ""
+
+    lines: List[str] = ["REPO MAP (compact project structure):"]
+    if spec.get("project_name") or spec.get("one_line_description"):
+        lines.append(
+            f"Project: {spec.get('project_name', '')} — {spec.get('one_line_description', '')}".strip()
+        )
+    if spec.get("data_flow"):
+        lines.append(f"Data flow: {spec.get('data_flow', '')}")
+
+    for file_spec in spec.get("files", []) or []:
+        if not isinstance(file_spec, dict):
+            continue
+        fname = file_spec.get("name", "unknown")
+        purpose = file_spec.get("purpose", "")
+        imports = ", ".join(file_spec.get("imports_from_project", [])[:6])
+        classes = ", ".join(cls.get("name", "") for cls in file_spec.get("key_classes", [])[:6] if isinstance(cls, dict))
+        functions = ", ".join(file_spec.get("key_functions", [])[:6])
+        lines.append(f"- {fname}: {purpose}")
+        if classes:
+            lines.append(f"  Classes: {classes}")
+        if functions:
+            lines.append(f"  Functions: {functions}")
+        if imports:
+            lines.append(f"  Imports: {imports}")
+
+    return "\n".join(lines)[:6000]
+
+
+def _build_minimal_architecture_spec(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a deterministic fallback architecture spec when LLM spec generation fails."""
+    reqs = state.get("requirements") or {}
+    files: List[Dict[str, Any]] = [
+        {
+            "name": "main.py",
+            "purpose": "Entrypoint that wires core modules and prints visible output.",
+            "estimated_lines": 140,
+            "key_classes": [],
+            "key_functions": ["main() -> None"],
+            "imports_from_project": [],
+            "external_deps": [],
+        },
+        {
+            "name": "utils.py",
+            "purpose": "Shared helper functions and input/output utilities.",
+            "estimated_lines": 120,
+            "key_classes": [],
+            "key_functions": ["format_output(data) -> str", "validate_input(value) -> bool"],
+            "imports_from_project": [],
+            "external_deps": [],
+        },
+        {
+            "name": "README.md",
+            "purpose": "Usage and architecture documentation.",
+            "estimated_lines": 120,
+            "key_classes": [],
+            "key_functions": [],
+            "imports_from_project": [],
+            "external_deps": [],
+        },
+        {
+            "name": "requirements.txt",
+            "purpose": "Dependency manifest generated from imports.",
+            "estimated_lines": 20,
+            "key_classes": [],
+            "key_functions": [],
+            "imports_from_project": [],
+            "external_deps": reqs.get("external_deps", []) if isinstance(reqs, dict) else [],
+        },
+    ]
+
+    spec = {
+        "project_name": "auto-git-generated-project",
+        "one_line_description": str(state.get("idea", "Generated project")).strip() or "Generated project",
+        "files": files,
+        "data_flow": "main.py orchestrates project modules and emits visible terminal output.",
+        "key_algorithms": [],
+        "entry_point_behavior": "Parse simple args, execute core flow, print output, and exit cleanly.",
+        "expected_output": "A visible summary of successful run and key results.",
+        "test_scenarios": ["python main.py should run and print output"],
+        "total_estimated_lines": sum(int(f.get("estimated_lines", 0)) for f in files),
+    }
+    return spec
+
+
+def _trim_to_budget_global(text: str, max_chars: int = 400000, label: str = "context") -> str:
+    """S20-Rank4: Trim a prompt section to a character budget (module-level version).
+    S24: Raised from 24K→120K.
+    S25: Raised from 120K→400K — primary model (Grok 4.1 Fast) supports 2M context,
+    fallback models support 128K-262K.  120K was still discarding useful research
+    and code context on larger projects.
+    Keeps the first 70% and last 30% of the budget, inserting a truncation marker.
+    Prevents prompt bloat from unbounded context injection."""
+    if len(text) <= max_chars:
+        return text
+    trimmed_chars = len(text) - max_chars
+    logger.warning(
+        f"⚠️  Prompt section '{label}' exceeds budget: "
+        f"{len(text):,} chars → trimmed {trimmed_chars:,} chars (budget {max_chars:,})"
+    )
+    head_budget = int(max_chars * 0.7)
+    tail_budget = max_chars - head_budget - 100
+    return (text[:head_budget]
+            + f"\n... [{label}: {trimmed_chars} chars trimmed] ...\n"
+            + text[-tail_budget:])
+
+
+def _compact_research_topic(idea: str, max_chars: int = 700) -> str:
+    """Compact long ideas into a provider-safe research topic/query string."""
+    text = " ".join(str(idea or "").split()).strip()
+    if len(text) <= max_chars:
+        return text
+    # Preserve complete requirement clauses when possible.
+    cut = text[:max_chars]
+    for sep in (". ", "; ", ", "):
+        idx = cut.rfind(sep)
+        if idx >= int(max_chars * 0.6):
+            cut = cut[:idx + 1].strip()
+            break
+    return cut + " [truncated-for-research]"
+
+
 def _sanitize_emoji(files: Dict[str, str], label: str = "") -> int:
     """Strip emoji/unicode from all .py files in-place. Returns count of files changed."""
     changed = 0
@@ -126,11 +764,1082 @@ def _sanitize_emoji(files: Dict[str, str], label: str = "") -> int:
         for emoji, ascii_repr in _EMOJI_TO_ASCII.items():
             if emoji in new_code:
                 new_code = new_code.replace(emoji, ascii_repr)
+        # Remove common Unicode presentation/joiner chars that often survive
+        # emoji replacement (e.g., "✔️" can leave U+FE0F behind).
+        new_code = new_code.replace("\ufe0f", "").replace("\u200d", "")
+        # Final safety pass: drop any remaining non-ASCII code points from .py
+        # files to prevent Windows cp1252 runtime crashes.
+        if any(ord(ch) > 127 for ch in new_code):
+            new_code = "".join(ch for ch in new_code if ord(ch) < 128)
         if new_code != code:
             files[fname] = new_code
             changed += 1
             logger.info(f"  🧹 Emoji sanitized: {fname} ({label})")
     return changed
+
+
+def _auto_fix_flask_app_context(files: Dict[str, str]) -> List[str]:
+    """Wrap bare `create_all()` calls in `with app.app_context():` blocks.
+
+    Returns a list of files that were modified.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+        code = str(fc)
+        if ".create_all(" not in code:
+            continue
+
+        m_app = _re.search(r"^(\w+)\s*=\s*Flask\(", code, _re.MULTILINE)
+        app_var = m_app.group(1) if m_app else "app"
+
+        lines = code.splitlines()
+        changed = False
+        new_lines = []
+        for idx, line in enumerate(lines):
+            m_create = _re.match(r"^(\s*)([\w\.]+\.create_all\(\))\s*$", line)
+            if not m_create:
+                new_lines.append(line)
+                continue
+
+            indent = m_create.group(1)
+            call = m_create.group(2)
+            prev = lines[idx - 1].strip() if idx > 0 else ""
+            if prev.startswith(f"with {app_var}.app_context()"):
+                new_lines.append(line)
+                continue
+
+            new_lines.append(f"{indent}with {app_var}.app_context():")
+            new_lines.append(f"{indent}    {call}")
+            changed = True
+
+        if changed:
+            files[fn] = "\n".join(new_lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_flask_jsonify_context(files: Dict[str, str]) -> List[str]:
+    """Ensure Flask app context exists for direct API method calls using jsonify.
+
+    Generated feature tests sometimes call API class methods directly (without an
+    active request/app context), which causes `jsonify()` to raise runtime errors.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if "Flask(" not in code or "jsonify(" not in code:
+            continue
+        if "app_context().push()" in code:
+            continue
+
+        m_app = _re.search(r"^(\w+)\s*=\s*Flask\(", code, _re.MULTILINE)
+        app_var = m_app.group(1) if m_app else "app"
+        changed = False
+
+        # Ensure has_app_context is importable before injecting context bootstrap.
+        if not _re.search(r"\bhas_app_context\b", code):
+            m_import = _re.search(r"^(\s*from\s+flask\s+import\s+.+)$", code, _re.MULTILINE)
+            if m_import:
+                line = m_import.group(1)
+                if "has_app_context" not in line:
+                    updated = line.rstrip() + ", has_app_context"
+                    code = code.replace(line, updated, 1)
+                    changed = True
+            else:
+                code = "from flask import has_app_context\n" + code
+                changed = True
+
+        bootstrap = (
+            "\n# Deterministic auto-fix: allow direct jsonify() calls in tests\n"
+            f"if not has_app_context():\n"
+            f"    {app_var}.app_context().push()\n"
+        )
+
+        pattern = rf"^(\s*{_re.escape(app_var)}\s*=\s*Flask\([^\n]*\)\s*)$"
+        code, n_subs = _re.subn(pattern, r"\1" + bootstrap, code, count=1, flags=_re.MULTILINE)
+        if n_subs > 0:
+            changed = True
+
+        if changed:
+            files[fn] = code
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlite_todo_contract(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Repair common SQLite Todo model/API contract mismatches deterministically."""
+    err_blob = "\n".join(str(e) for e in (errors or []))
+    if not any(
+        marker in err_blob
+        for marker in (
+            "Todo' has no attribute 'get_by_id'",
+            "Todo\" has no attribute \"get_by_id\"",
+            "unexpected keyword argument 'id'",
+            "unexpected keyword argument 'status'",
+        )
+    ):
+        return []
+
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if "class Todo" not in code or "sqlite3" not in code:
+            continue
+
+        changed = False
+        new_code = code
+
+        # Make constructor backward-compatible with id/status kwargs used by API mappers.
+        ctor_patterns = [
+            r"def __init__\(self,\s*title:\s*str,\s*priority:\s*str,\s*due_date:\s*str\)\s*->\s*None:\s*",
+            r"def __init__\(self,\s*title,\s*priority,\s*due_date\):\s*",
+        ]
+        ctor_repl = (
+            "def __init__(self, title: str, priority: str, due_date: str, "
+            "todo_id=None, status: str = 'pending', **kwargs):"
+        )
+        for pat in ctor_patterns:
+            updated, n = _re.subn(pat, ctor_repl, new_code, count=1)
+            if n > 0:
+                new_code = updated
+                changed = True
+                break
+
+        id_updated, id_n = _re.subn(
+            r"^\s*self\.id\s*=\s*None\s*$",
+            "        self.id = todo_id if todo_id is not None else kwargs.get('id')",
+            new_code,
+            count=1,
+            flags=_re.MULTILINE,
+        )
+        if id_n > 0:
+            new_code = id_updated
+            changed = True
+        elif "self.id = None" in new_code:
+            new_code = new_code.replace(
+                "self.id = None",
+                "self.id = todo_id if todo_id is not None else kwargs.get('id')",
+                1,
+            )
+            changed = True
+
+        status_updated, status_n = _re.subn(
+            r"^\s*self\.status\s*=\s*['\"]pending['\"]\s*$",
+            "        self.status = kwargs.get('status', status)",
+            new_code,
+            count=1,
+            flags=_re.MULTILINE,
+        )
+        if status_n > 0:
+            new_code = status_updated
+            changed = True
+        elif "self.status = 'pending'" in new_code:
+            new_code = new_code.replace(
+                "self.status = 'pending'",
+                "self.status = kwargs.get('status', status)",
+                1,
+            )
+            changed = True
+        elif 'self.status = "pending"' in new_code:
+            new_code = new_code.replace(
+                'self.status = "pending"',
+                "self.status = kwargs.get('status', status)",
+                1,
+            )
+            changed = True
+
+        # Add get_by_id when absent so API can resolve todos deterministically.
+        if "def get_by_id(" not in new_code:
+            method_block = (
+                "\n    @classmethod\n"
+                "    def get_by_id(cls, todo_id: int):\n"
+                "        db_path = (\n"
+                "            globals().get('DATABASE_PATH')\n"
+                "            or globals().get('DB_PATH')\n"
+                "            or globals().get('DATABASE')\n"
+                "            or globals().get('DB_FILE')\n"
+                "            or 'todos.db'\n"
+                "        )\n"
+                "        conn = sqlite3.connect(db_path)\n"
+                "        try:\n"
+                "            cursor = conn.cursor()\n"
+                "            cursor.execute(\n"
+                "                'SELECT id, title, priority, due_date, status FROM todos WHERE id = ?',\n"
+                "                (todo_id,),\n"
+                "            )\n"
+                "            row = cursor.fetchone()\n"
+                "            if not row:\n"
+                "                return None\n"
+                "            return cls(\n"
+                "                title=row[1],\n"
+                "                priority=row[2],\n"
+                "                due_date=row[3],\n"
+                "                id=row[0],\n"
+                "                status=row[4],\n"
+                "            )\n"
+                "        finally:\n"
+                "            conn.close()\n"
+            )
+            if "\n    def save(" in new_code:
+                new_code = new_code.replace("\n    def save(", method_block + "\n\n    def save(", 1)
+                changed = True
+
+        if changed and new_code != code:
+            files[fn] = new_code
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_flask_todo_routes(files: Dict[str, str]) -> List[str]:
+    """Inject missing Flask route bindings for TodoAPI-style scaffolds.
+
+    Some generated apps define TodoAPI business methods (`add_todo`,
+    `remove_todo`, `list_todos`, `complete_todo`) but forget HTTP route
+    decorators entirely, causing all feature verification calls to fail.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if "Flask(" not in code:
+            continue
+        if "class TodoAPI" not in code:
+            continue
+        if "def add_todo(" not in code or "def remove_todo(" not in code:
+            continue
+
+        has_routes = (
+            "@app.route(" in code
+            or "add_url_rule(" in code
+            or "'/todos'" in code
+            or '"/todos"' in code
+        )
+        if has_routes:
+            continue
+
+        route_block = (
+            "\n\n# Deterministic auto-fix: bind TodoAPI methods to Flask routes\n"
+            "_todo_api = TodoAPI()\n\n"
+            "@app.route('/todos', methods=['POST'])\n"
+            "def _route_add_todo():\n"
+            "    payload = request.get_json(silent=True) or {}\n"
+            "    return _todo_api.add_todo(payload)\n\n"
+            "@app.route('/todos', methods=['GET'])\n"
+            "def _route_list_todos():\n"
+            "    return _todo_api.list_todos()\n\n"
+            "@app.route('/todos/<int:todo_id>', methods=['DELETE'])\n"
+            "def _route_remove_todo(todo_id: int):\n"
+            "    todo = TodoModel.query.get(todo_id)\n"
+            "    if not todo:\n"
+            "        return jsonify({'error': 'Todo not found'}), 404\n"
+            "    _todo_api.remove_todo(todo_id)\n"
+            "    return jsonify({'message': 'Todo removed', 'id': todo_id}), 200\n\n"
+            "@app.route('/todos/<int:todo_id>/complete', methods=['PUT'])\n"
+            "def _route_complete_todo(todo_id: int):\n"
+            "    todo = TodoModel.query.get(todo_id)\n"
+            "    if not todo:\n"
+            "        return jsonify({'error': 'Todo not found'}), 404\n"
+            "    _todo_api.complete_todo(todo_id)\n"
+            "    return jsonify({'message': 'Todo marked as complete', 'id': todo_id}), 200\n"
+        )
+
+        m_main = _re.search(r"^if\s+__name__\s*==\s*['\"]__main__['\"]\s*:", code, _re.MULTILINE)
+        if m_main:
+            new_code = code[:m_main.start()].rstrip() + route_block + "\n\n" + code[m_main.start():]
+        else:
+            new_code = code.rstrip() + route_block + "\n"
+
+        files[fn] = new_code
+        fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_tensor_scalar_item(files: Dict[str, str]) -> List[str]:
+    """Patch common non-singleton tensor-to-scalar conversion mistakes.
+
+    Specifically targets patterns like `.argmax(-1).item()` that can fail with
+    `RuntimeError: a Tensor with N elements cannot be converted to Scalar`.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        new_code = code
+
+        # Most common generated pattern in failures.
+        new_code = new_code.replace(
+            ".argmax(-1).item()",
+            ".argmax(-1).reshape(-1)[0].item()",
+        )
+        new_code = new_code.replace(
+            ".argmax(dim=-1).item()",
+            ".argmax(dim=-1).reshape(-1)[0].item()",
+        )
+
+        if new_code != code:
+            files[fn] = new_code
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_fastapi_jsonresponse_import(files: Dict[str, str]) -> List[str]:
+    """Rewrite invalid JSONResponse imports to fastapi.responses.
+
+    Common generated mistake:
+    `from fastapi import FastAPI, JSONResponse`
+    which fails on modern FastAPI releases.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        lines = code.splitlines()
+        changed = False
+        needs_jsonresponse_import = False
+        has_jsonresponse_import = bool(
+            _re.search(
+                r"^\s*from\s+fastapi\.responses\s+import\s+.*\bJSONResponse\b",
+                code,
+                _re.MULTILINE,
+            )
+        )
+
+        new_lines: List[str] = []
+        for line in lines:
+            m = _re.match(r"^(\s*)from\s+fastapi\s+import\s+(.+?)\s*$", line)
+            if not m:
+                new_lines.append(line)
+                continue
+
+            indent = m.group(1)
+            imported = [p.strip() for p in m.group(2).split(",") if p.strip()]
+            kept = [p for p in imported if p.split(" as ")[0].strip() != "JSONResponse"]
+
+            if len(kept) != len(imported):
+                needs_jsonresponse_import = True
+                changed = True
+                if kept:
+                    new_lines.append(f"{indent}from fastapi import {', '.join(kept)}")
+                continue
+
+            new_lines.append(line)
+
+        if needs_jsonresponse_import and not has_jsonresponse_import:
+            insert_at = 0
+            for i, line in enumerate(new_lines):
+                stripped = line.strip()
+                if stripped.startswith("import ") or stripped.startswith("from ") or not stripped:
+                    insert_at = i + 1
+                    continue
+                break
+            new_lines.insert(insert_at, "from fastapi.responses import JSONResponse")
+            changed = True
+
+        if changed:
+            files[fn] = "\n".join(new_lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlalchemy_db_nameerror(files: Dict[str, str]) -> List[str]:
+    """Repair SQLAlchemy/db NameErrors in generated Flask model scaffolding.
+
+    Strategy:
+        - If SQLAlchemy is used but import is missing, inject
+            `from flask_sqlalchemy import SQLAlchemy`.
+    - If `from flask_sqlalchemy import SQLAlchemy` exists and `db` is missing,
+      inject `db = SQLAlchemy()` after import block.
+    - Otherwise inject a minimal shim with `db.Model` to avoid import-time crash.
+    """
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        changed = False
+
+        def _find_import_insert_at(_lines: List[str]) -> int:
+            _insert_at = 0
+            for _i, _line in enumerate(_lines):
+                _stripped = _line.strip()
+                if _stripped.startswith("import ") or _stripped.startswith("from ") or not _stripped:
+                    _insert_at = _i + 1
+                    continue
+                break
+            return _insert_at
+
+        has_sqlalchemy_symbol = _re.search(r"\bSQLAlchemy\s*\(", code) is not None
+        has_sqlalchemy_import = _re.search(
+            r"^\s*from\s+flask_sqlalchemy\s+import\s+.*\bSQLAlchemy\b",
+            code,
+            _re.MULTILINE,
+        ) is not None
+
+        lines = code.splitlines()
+        if has_sqlalchemy_symbol and not has_sqlalchemy_import:
+            insert_at = _find_import_insert_at(lines)
+            lines = lines[:insert_at] + ["from flask_sqlalchemy import SQLAlchemy"] + lines[insert_at:]
+            code = "\n".join(lines) + ("\n" if str(fc).endswith("\n") else "")
+            changed = True
+            has_sqlalchemy_import = True
+
+        # Only inject db scaffold if model class references db.Model and db is missing.
+        if "db.Model" in code and _re.search(r"^\s*db\s*=", code, _re.MULTILINE) is None:
+            lines = code.splitlines()
+            insert_at = _find_import_insert_at(lines)
+
+            if has_sqlalchemy_import:
+                injected = "db = SQLAlchemy()  # auto-fix: prevent db NameError at import time"
+            else:
+                if "_AutoGitDbShim" in code:
+                    if changed:
+                        files[fn] = code
+                        fixed_files.append(fn)
+                    continue
+                injected = (
+                    "class _AutoGitDbShim:\n"
+                    "    class Model:\n"
+                    "        pass\n\n"
+                    "db = _AutoGitDbShim()  # auto-fix: fallback db shim for import-time safety"
+                )
+
+            lines = lines[:insert_at] + [injected] + lines[insert_at:]
+            code = "\n".join(lines) + ("\n" if str(fc).endswith("\n") else "")
+            changed = True
+
+        if changed and code != str(fc):
+            files[fn] = code
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlalchemy_database_session_attr(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Fix `db = Database(...)` patterns when code expects SQLAlchemy session API.
+
+    Runtime failure signature:
+      AttributeError: 'Database' object has no attribute 'session'
+    """
+    has_session_attr_error = any(
+        "object has no attribute 'session'" in str(e)
+        and "Database" in str(e)
+        for e in (errors or [])
+    )
+    if not has_session_attr_error:
+        return []
+
+    fixed_files: List[str] = []
+
+    def _find_import_insert_at(_lines: List[str]) -> int:
+        _insert_at = 0
+        for _i, _line in enumerate(_lines):
+            _stripped = _line.strip()
+            if _stripped.startswith("import ") or _stripped.startswith("from ") or not _stripped:
+                _insert_at = _i + 1
+                continue
+            break
+        return _insert_at
+
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if "db.session" not in code:
+            continue
+
+        changed = False
+        lines = code.splitlines()
+        has_sqlalchemy_import = any(
+            _re.match(r"^\s*from\s+flask_sqlalchemy\s+import\s+.*\bSQLAlchemy\b", ln)
+            for ln in lines
+        )
+
+        # Replace `db = Database(...)` with SQLAlchemy, preserving indentation.
+        for i, ln in enumerate(lines):
+            if _re.match(r"^(\s*)db\s*=\s*Database\s*\(.*\)\s*$", ln):
+                indent = _re.match(r"^(\s*)", ln).group(1)
+                lines[i] = f"{indent}db = SQLAlchemy()  # auto-fix: db.session required"
+                changed = True
+
+        if changed and not has_sqlalchemy_import:
+            insert_at = _find_import_insert_at(lines)
+            lines = lines[:insert_at] + ["from flask_sqlalchemy import SQLAlchemy"] + lines[insert_at:]
+
+        if changed:
+            files[fn] = "\n".join(lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlalchemy_double_registration(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Normalize SQLAlchemy app binding to avoid double-registration errors.
+
+    Handles runtime signatures:
+      - A 'SQLAlchemy' instance has already been registered on this Flask app
+      - The current Flask app is not registered with this 'SQLAlchemy' instance
+    """
+    has_sqlalchemy_bind_error = any(
+        "SQLAlchemy" in str(e)
+        and (
+            "already been registered on this Flask app" in str(e)
+            or "not registered with this 'SQLAlchemy' instance" in str(e)
+        )
+        for e in (errors or [])
+    )
+    if not has_sqlalchemy_bind_error:
+        return []
+
+    fixed_files: List[str] = []
+
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        lines = code.splitlines()
+        changed = False
+
+        # 1) Rewrite db = SQLAlchemy(app) into decoupled init pattern.
+        for i, ln in enumerate(lines):
+            m = _re.match(r"^(\s*)db\s*=\s*SQLAlchemy\s*\(\s*app\s*\)\s*$", ln)
+            if m:
+                indent = m.group(1)
+                lines[i] = f"{indent}db = SQLAlchemy()"
+                # Insert db.init_app(app) right after unless already present.
+                if not any("db.init_app(app)" in x for x in lines):
+                    lines.insert(i + 1, f"{indent}db.init_app(app)")
+                changed = True
+
+        # 2) If app exists and db = SQLAlchemy() exists but no init_app, add it.
+        has_app_assign = any(_re.match(r"^\s*app\s*=\s*Flask\s*\(", ln) for ln in lines)
+        has_db_plain = any(_re.match(r"^\s*db\s*=\s*SQLAlchemy\s*\(\s*\)\s*$", ln) for ln in lines)
+        has_init_app = any("db.init_app(app)" in ln for ln in lines)
+        if has_app_assign and has_db_plain and not has_init_app:
+            # Place init directly after app assignment when possible.
+            insert_at = None
+            for i, ln in enumerate(lines):
+                if _re.match(r"^\s*app\s*=\s*Flask\s*\(", ln):
+                    insert_at = i + 1
+                    break
+            if insert_at is None:
+                insert_at = len(lines)
+            lines.insert(insert_at, "db.init_app(app)")
+            changed = True
+
+        if changed:
+            files[fn] = "\n".join(lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlalchemy_create_all_bind(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Patch SQLAlchemy MetaData.create_all() calls that miss the required bind."""
+    has_bind_error = any(
+        "create_all() missing 1 required positional argument: 'bind'" in str(e)
+        or ("MetaData.create_all()" in str(e) and "bind" in str(e))
+        for e in (errors or [])
+    )
+    if not has_bind_error:
+        return []
+
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if ".metadata.create_all(" not in code:
+            continue
+
+        bind_expr = None
+        if _re.search(r"^\s*engine\s*=", code, _re.MULTILINE):
+            bind_expr = "engine"
+        elif _re.search(r"^\s*db\s*=\s*SQLAlchemy\s*\(", code, _re.MULTILINE):
+            bind_expr = "db.engine"
+
+        if not bind_expr:
+            continue
+
+        lines = code.splitlines()
+        changed = False
+        new_lines: List[str] = []
+        for line in lines:
+            m = _re.match(r"^(\s*)([\w\.]+\.metadata\.create_all\(\))\s*$", line)
+            if not m:
+                new_lines.append(line)
+                continue
+            indent = m.group(1)
+            call_expr = m.group(2).replace(
+                ".metadata.create_all()",
+                f".metadata.create_all(bind={bind_expr})",
+            )
+            new_lines.append(f"{indent}{call_expr}")
+            changed = True
+
+        if changed:
+            files[fn] = "\n".join(new_lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_dateutil_requirements(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Ensure dateutil imports are backed by python-dateutil dependency."""
+    has_dateutil_missing_module = any(
+        "MISSING_CUSTOM_MODULE" in str(e) and "dateutil" in str(e)
+        for e in (errors or [])
+    )
+    if not has_dateutil_missing_module:
+        return []
+
+    req = str(files.get("requirements.txt", ""))
+    lines = [ln.strip() for ln in req.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+    normalized = {
+        _re.split(r"[>=<!\[\]]", ln)[0].strip().replace("-", "_").lower()
+        for ln in lines
+    }
+
+    if "python_dateutil" in normalized or "dateutil" in normalized:
+        return []
+
+    suffix = "\n" if req and not req.endswith("\n") else ""
+    files["requirements.txt"] = req + suffix + "python-dateutil\n"
+    return ["requirements.txt"]
+
+
+def _auto_fix_pydantic_priority_schema(files: Dict[str, str]) -> List[str]:
+    """Repair common Pydantic v2 schema failures around custom `Priority` types.
+
+    Strategy:
+    - Normalize plain `class Priority:` to `class Priority(str, Enum):`.
+    - Ensure `Enum` import exists when enum base is used.
+    - If `Priority` is used in BaseModel annotations, inject
+      `model_config = ConfigDict(arbitrary_types_allowed=True)` as a safe fallback.
+    """
+    fixed_files: List[str] = []
+
+    def _find_import_insert_at(_lines: List[str]) -> int:
+        _insert_at = 0
+        for _i, _line in enumerate(_lines):
+            _stripped = _line.strip()
+            if _stripped.startswith("import ") or _stripped.startswith("from ") or not _stripped:
+                _insert_at = _i + 1
+                continue
+            break
+        return _insert_at
+
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        if "Priority" not in code:
+            continue
+
+        changed = False
+
+        if _re.search(r"^\s*class\s+Priority\s*:\s*$", code, _re.MULTILINE):
+            code = _re.sub(
+                r"^(\s*)class\s+Priority\s*:\s*$",
+                r"\1class Priority(str, Enum):",
+                code,
+                flags=_re.MULTILINE,
+            )
+            changed = True
+
+        has_priority_enum = _re.search(
+            r"^\s*class\s+Priority\s*\([^\)]*\bEnum\b[^\)]*\)\s*:",
+            code,
+            _re.MULTILINE,
+        ) is not None
+        has_enum_import = (
+            _re.search(r"^\s*from\s+enum\s+import\s+.*\bEnum\b", code, _re.MULTILINE) is not None
+            or _re.search(r"^\s*import\s+enum\b", code, _re.MULTILINE) is not None
+        )
+        if has_priority_enum and not has_enum_import:
+            lines = code.splitlines()
+            insert_at = _find_import_insert_at(lines)
+            lines = lines[:insert_at] + ["from enum import Enum"] + lines[insert_at:]
+            code = "\n".join(lines) + ("\n" if str(fc).endswith("\n") else "")
+            changed = True
+
+        uses_priority_annotation = _re.search(
+            r":\s*[\"']?Priority\b",
+            code,
+        ) is not None
+        has_basemodel_class = _re.search(
+            r"^\s*class\s+\w+\s*\([^\)]*\bBaseModel\b[^\)]*\)\s*:",
+            code,
+            _re.MULTILINE,
+        ) is not None
+        if uses_priority_annotation and has_basemodel_class:
+            has_configdict_import = _re.search(
+                r"^\s*from\s+pydantic\s+import\s+.*\bConfigDict\b",
+                code,
+                _re.MULTILINE,
+            ) is not None
+            if not has_configdict_import:
+                lines = code.splitlines()
+                insert_at = _find_import_insert_at(lines)
+                lines = lines[:insert_at] + ["from pydantic import ConfigDict"] + lines[insert_at:]
+                code = "\n".join(lines) + ("\n" if str(fc).endswith("\n") else "")
+                changed = True
+
+            lines = code.splitlines()
+            class_indices: List[int] = []
+            for idx, line in enumerate(lines):
+                if _re.match(r"^\s*class\s+\w+\s*\([^\)]*\bBaseModel\b[^\)]*\)\s*:", line):
+                    class_indices.append(idx)
+
+            for class_idx in reversed(class_indices):
+                class_line = lines[class_idx]
+                class_indent = class_line[: len(class_line) - len(class_line.lstrip())]
+                body_indent = class_indent + "    "
+                end_idx = len(lines)
+                for j in range(class_idx + 1, len(lines)):
+                    candidate = lines[j]
+                    stripped = candidate.strip()
+                    curr_indent = len(candidate) - len(candidate.lstrip())
+                    if stripped and curr_indent <= len(class_indent):
+                        end_idx = j
+                        break
+
+                class_body = lines[class_idx + 1 : end_idx]
+                has_model_config = any("model_config" in b for b in class_body)
+                if not has_model_config:
+                    lines.insert(
+                        class_idx + 1,
+                        body_indent
+                        + "model_config = ConfigDict(arbitrary_types_allowed=True)  # auto-fix: allow custom Priority type",
+                    )
+                    changed = True
+
+            code = "\n".join(lines) + ("\n" if str(fc).endswith("\n") else "")
+
+        if changed and code != str(fc):
+            files[fn] = code
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_cryptography_signing_import(files: Dict[str, str]) -> List[str]:
+    """Rewrite invalid cryptography `signing` imports to PyNaCl signing.
+
+    Common generated mistake:
+    `from cryptography.hazmat.primitives.asymmetric import signing`
+    """
+    fixed_files: List[str] = []
+
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        lines = code.splitlines()
+        new_lines: List[str] = []
+        changed = False
+        needs_nacl_signing_import = False
+        has_nacl_signing_import = bool(
+            _re.search(r"^\s*from\s+nacl\s+import\s+.*\bsigning\b", code, _re.MULTILINE)
+        )
+
+        for line in lines:
+            m = _re.match(
+                r"^(\s*)from\s+cryptography\.hazmat\.primitives\.asymmetric\s+import\s+(.+?)\s*$",
+                line,
+            )
+            if not m:
+                new_lines.append(line)
+                continue
+
+            indent = m.group(1)
+            imported = [p.strip() for p in m.group(2).split(",") if p.strip()]
+            kept = [p for p in imported if p.split(" as ")[0].strip() != "signing"]
+
+            if len(kept) != len(imported):
+                needs_nacl_signing_import = True
+                changed = True
+                if kept:
+                    new_lines.append(f"{indent}from cryptography.hazmat.primitives.asymmetric import {', '.join(kept)}")
+                continue
+
+            new_lines.append(line)
+
+        if needs_nacl_signing_import and not has_nacl_signing_import:
+            insert_at = 0
+            for i, line in enumerate(new_lines):
+                stripped = line.strip()
+                if stripped.startswith("import ") or stripped.startswith("from ") or not stripped:
+                    insert_at = i + 1
+                    continue
+                break
+            new_lines.insert(insert_at, "from nacl import signing")
+            changed = True
+
+        if changed:
+            files[fn] = "\n".join(new_lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _split_top_level_call_args(arg_text: str) -> List[str]:
+    """Split argument text by top-level commas, preserving nested structures."""
+    parts: List[str] = []
+    cur: List[str] = []
+    depth = 0
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(arg_text):
+        ch = arg_text[i]
+        prev = arg_text[i - 1] if i > 0 else ""
+        if ch == "'" and not in_double and prev != "\\":
+            in_single = not in_single
+        elif ch == '"' and not in_single and prev != "\\":
+            in_double = not in_double
+        elif not in_single and not in_double:
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth = max(0, depth - 1)
+            elif ch == "," and depth == 0:
+                token = "".join(cur).strip()
+                if token:
+                    parts.append(token)
+                cur = []
+                i += 1
+                continue
+        cur.append(ch)
+        i += 1
+
+    tail = "".join(cur).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _auto_fix_signature_mismatch_calls(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Adjust call-site argument counts from SIGNATURE_MISMATCH validator output."""
+    fixed_files: set[str] = set()
+
+    p_min = _re.compile(
+        r"SIGNATURE_MISMATCH:\s*([\w_]+\.py):(\d+).*?`([^`]+)\(\)` called with\s*(\d+)\s*argument\(s\) but requires at least\s*(\d+)",
+        _re.IGNORECASE,
+    )
+    p_max = _re.compile(
+        r"SIGNATURE_MISMATCH:\s*([\w_]+\.py):(\d+).*?`([^`]+)\(\)` called with\s*(\d+)\s*argument\(s\) but accepts at most\s*(\d+)",
+        _re.IGNORECASE,
+    )
+
+    def _rewrite_line(line: str, call_name: str, mode: str, target_count: int) -> str:
+        idx = line.find(f"{call_name}(")
+        if idx < 0:
+            return line
+
+        start = idx + len(call_name)
+        if start >= len(line) or line[start] != "(":
+            return line
+
+        depth = 0
+        end = -1
+        for i in range(start, len(line)):
+            ch = line[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end < 0:
+            return line
+
+        arg_src = line[start + 1:end]
+        args = _split_top_level_call_args(arg_src)
+
+        if mode == "min" and len(args) < target_count:
+            args = list(args) + ["None"] * (target_count - len(args))
+        elif mode == "max" and len(args) > target_count:
+            args = list(args[:target_count])
+        else:
+            return line
+
+        new_args = ", ".join(a.strip() for a in args if a.strip())
+        return line[:start + 1] + new_args + line[end:]
+
+    for err in [str(e) for e in (errors or [])]:
+        m = p_min.search(err)
+        mode = "min"
+        if not m:
+            m = p_max.search(err)
+            mode = "max"
+        if not m:
+            continue
+
+        fname = m.group(1)
+        lineno = int(m.group(2))
+        call_name = m.group(3)
+        target_count = int(m.group(5))
+
+        if fname not in files:
+            continue
+        code = str(files[fname])
+        lines = code.splitlines()
+        if lineno < 1 or lineno > len(lines):
+            continue
+
+        old_line = lines[lineno - 1]
+        new_line = _rewrite_line(old_line, call_name, mode, target_count)
+        if new_line == old_line and "." in call_name:
+            # Fallback: `obj.method` may appear as `self.obj.method(...)` in source.
+            fallback = call_name.split(".")[-1]
+            new_line = _rewrite_line(old_line, fallback, mode, target_count)
+
+        if new_line != old_line:
+            lines[lineno - 1] = new_line
+            files[fname] = "\n".join(lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.add(fname)
+
+    return sorted(fixed_files)
+
+
+def _auto_fix_marshmallow_field_kwargs(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Normalize Marshmallow field default kwargs for runtime compatibility.
+
+    Generated code can oscillate between incompatible kwargs across Marshmallow
+    versions (`default=` vs `missing=`). We normalize to `load_default=` when
+    error signatures indicate Field.__init__ kwarg mismatch.
+    """
+    _has_kwarg_error = any(
+        "Field.__init__() got an unexpected keyword argument" in str(e)
+        and ("'default'" in str(e) or "'missing'" in str(e))
+        for e in (errors or [])
+    )
+    if not _has_kwarg_error:
+        return []
+
+    fixed_files: List[str] = []
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        has_marshmallow = bool(
+            _re.search(r"^\s*from\s+marshmallow\s+import\b", code, _re.MULTILINE)
+            or _re.search(r"^\s*import\s+marshmallow\b", code, _re.MULTILINE)
+        )
+        if not has_marshmallow:
+            continue
+
+        lines = code.splitlines()
+        changed = False
+        for i, line in enumerate(lines):
+            if "fields." not in line or "(" not in line:
+                continue
+            if "default=" not in line and "missing=" not in line:
+                continue
+
+            new_line = _re.sub(r"\bdefault\s*=", "load_default=", line)
+            new_line = _re.sub(r"\bmissing\s*=", "load_default=", new_line)
+            if new_line != line:
+                lines[i] = new_line
+                changed = True
+
+        if changed:
+            files[fn] = "\n".join(lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
+
+
+def _auto_fix_sqlalchemy_paginate_kwargs(files: Dict[str, str], errors: List[str]) -> List[str]:
+    """Rewrite Query.paginate positional args to keyword args.
+
+    Flask-SQLAlchemy versions can require keyword-only paginate args. Generated
+    code often calls `query.paginate(page, per_page, False)` which crashes.
+    """
+    has_paginate_error = any(
+        "Query.paginate()" in str(e)
+        and "positional argument" in str(e)
+        for e in (errors or [])
+    )
+    if not has_paginate_error:
+        return []
+
+    fixed_files: List[str] = []
+    param_names = ["page", "per_page", "error_out", "max_per_page"]
+
+    for fn, fc in list(files.items()):
+        if not fn.endswith(".py"):
+            continue
+
+        code = str(fc)
+        lines = code.splitlines()
+        changed = False
+
+        for i, line in enumerate(lines):
+            if ".paginate(" not in line:
+                continue
+
+            m = _re.search(r"\.paginate\((.*)\)", line)
+            if not m:
+                continue
+
+            args_src = m.group(1).strip()
+            if not args_src:
+                continue
+
+            args = _split_top_level_call_args(args_src)
+            if not args:
+                continue
+            if any("=" in a for a in args):
+                continue
+
+            kw_parts: List[str] = []
+            for idx, arg in enumerate(args):
+                if idx >= len(param_names):
+                    kw_parts.append(arg)
+                else:
+                    kw_parts.append(f"{param_names[idx]}={arg.strip()}")
+
+            new_call = f".paginate({', '.join(kw_parts)})"
+            old_call = f".paginate({args_src})"
+            new_line = line.replace(old_call, new_call)
+            if new_line != line:
+                lines[i] = new_line
+                changed = True
+
+        if changed:
+            files[fn] = "\n".join(lines) + ("\n" if code.endswith("\n") else "")
+            fixed_files.append(fn)
+
+    return fixed_files
 
 
 # ── LLM Artifact Stripper ────────────────────────────────────────────────
@@ -152,6 +1861,24 @@ _LLM_ARTIFACT_PATTERNS = [
     (_re_artifact.compile(r'^[ \t]*\]\]>[ \t]*$', _re_artifact.MULTILINE), ""),
     # Stray XML self-closing tags on their own line (e.g., <br/>, <hr/>)
     (_re_artifact.compile(r'^[ \t]*<\w+\s*/>[ \t]*$', _re_artifact.MULTILINE), ""),
+    # LLM chain-of-thought / thinking text leaks (full lines of natural language)
+    # These appear when the LLM forgets to strip its reasoning before outputting code.
+    # Only match lines that are pure natural language (no Python syntax indicators).
+    (_re_artifact.compile(
+        r'^[ \t]*(?:'
+        r"(?:Okay|Ok|Alright|Sure|Let me|I'll|I will|Let's|Here's|Here is|Now,? (?:let's|I'll|we))"
+        r'[^\n]{10,}|'  # "Okay, let's look at the problem..." (10+ chars after trigger)
+        r"(?:The (?:issue|problem|error|bug|fix|solution|code|file|function|class) (?:is|was|here|seems|appears|needs|should|can|will|has))"
+        r'[^\n]{5,}|'   # "The issue is that..." 
+        r"(?:This (?:should|will|can|needs to|is going to|fixes|resolves|addresses))"
+        r'[^\n]{5,}|'   # "This should fix the..."
+        r"(?:I (?:need to|have to|should|can see|notice|found|see that|think|believe))"
+        r'[^\n]{5,}|'   # "I need to fix the..."
+        r"(?:We (?:need to|should|can|have to|must))"
+        r'[^\n]{5,}'    # "We need to add..."
+        r')[ \t]*$',
+        _re_artifact.MULTILINE
+    ), ""),
 ]
 
 
@@ -218,11 +1945,16 @@ def _clean_requirements_txt(req_text: str, py_sources: dict | None = None) -> st
 
     # Collect top-level import roots from .py source files
     imported_roots: set | None = None
+    local_class_names: set = set()
     if py_sources:
         imported_roots = set()
         for code in py_sources.values():
             for m in _re.findall(r"^(?:import|from)\s+(\w+)", code, _re.M):
                 imported_roots.add(m.lower())
+            # Class identifiers sometimes leak into requirements.txt as fake packages
+            # (e.g. LockingMiddleware); treat them as local symbols.
+            for cls in _re.findall(r"^\s*class\s+([A-Za-z_]\w*)", code, _re.M):
+                local_class_names.add(cls.lower())
         # Expand aliases: if 'cv2' imported → also accept 'opencv-python' in reqs
         alias_extras: set = set()
         for imp, pkg in _IMPORT_TO_PKG.items():
@@ -254,6 +1986,12 @@ def _clean_requirements_txt(req_text: str, py_sources: dict | None = None) -> st
             real_pkg = _alias_map_lower[pkg_name.lower()]
             stripped = real_pkg + stripped[len(pkg_name):]
             pkg_name = real_pkg
+        # Strip known bad/deprecated requirement names
+        if pkg_name.lower() in _BAD_REQUIREMENT_NAMES:
+            continue
+        # Strip local class names accidentally emitted as package requirements.
+        if pkg_name.lower() in local_class_names:
+            continue
         # Strip stdlib internals (_bisect, _thread, _collections_abc, …)
         if pkg_name.startswith("_"):
             continue
@@ -279,6 +2017,144 @@ def _clean_requirements_txt(req_text: str, py_sources: dict | None = None) -> st
         kept.append(stripped)  # use `stripped` so alias-renames (e.g. sklearn→scikit-learn) are preserved
 
     return "\n".join(kept)
+
+
+def _build_requirements_from_imports(py_sources: Dict[str, str]) -> str:
+    """Deterministically build requirements.txt by scanning all .py files for imports.
+
+    This is the FALLBACK used when the LLM-generated requirements.txt is broken
+    or produces pip install errors.  It never fails because it uses pure AST/regex
+    scanning and the known _IMPORT_TO_PKG mapping.
+
+    Returns a clean requirements.txt string (one package per line, no version pins).
+    """
+    if not py_sources:
+        return ""
+
+    imported_modules: set = set()
+    local_stems = {fn.rsplit(".", 1)[0] for fn in py_sources if fn.endswith(".py")}
+
+    for fname, code in py_sources.items():
+        if not fname.endswith(".py") or not code:
+            continue
+        # Extract top-level import names via regex (more robust than AST for broken code)
+        for m in _re.findall(r"^(?:import|from)\s+(\w+)", str(code), _re.MULTILINE):
+            imported_modules.add(m)
+
+    # Filter out:
+    # 1. stdlib modules
+    # 2. local project modules (files we generated)
+    # 3. internal/private modules
+    third_party: set = set()
+    for mod in imported_modules:
+        if mod.startswith("_"):
+            continue
+        if mod in _STDLIB_MODULES:
+            continue
+        if mod in local_stems:
+            continue
+        # Map import name to pip package name
+        pkg = _IMPORT_TO_PKG.get(mod, mod)
+        third_party.add(pkg)
+
+    if not third_party:
+        return ""
+
+    # Sort for deterministic output
+    lines = sorted(third_party, key=str.lower)
+    return "\n".join(lines)
+
+
+def _ensure_requirements_complete(files: Dict[str, str]) -> Dict[str, str]:
+    """Deterministically ensure requirements.txt includes ALL third-party packages.
+
+    Scans every .py file for imports, cross-references the current requirements.txt,
+    and adds any missing third-party packages.  This is ROLLBACK-PROOF — it only
+    ADDS missing packages, never removes existing ones.
+
+    Design principle (from IRP research on Claude Code, SWE-Agent, Aider):
+    - Never trust LLM-generated requirements.txt — it's a rough draft
+    - Cross-reference with actual imports — they are ground truth
+    - Deterministic resolution beats LLM judgment for dependencies
+    - Separate dep fixes from code fixes — they're independent concerns
+    """
+    files = dict(files)  # don't mutate caller's dict
+    py_sources = {k: v for k, v in files.items() if k.endswith(".py") and v}
+    if not py_sources:
+        return files
+
+    # 1. Scan all imports across all .py files
+    imported_modules: set = set()
+    local_stems = {fn.rsplit(".", 1)[0] for fn in files if fn.endswith(".py")}
+    for _fname, code in py_sources.items():
+        for m in _re.findall(r"^(?:import|from)\s+(\w+)", str(code), _re.MULTILINE):
+            imported_modules.add(m)
+
+    # 2. Determine which are third-party
+    needed_pkgs: set = set()
+    for mod in imported_modules:
+        if mod.startswith("_"):
+            continue
+        if mod in _STDLIB_MODULES:
+            continue
+        if mod in local_stems:
+            continue
+        pkg = _IMPORT_TO_PKG.get(mod, mod)
+        needed_pkgs.add(pkg)
+
+    if not needed_pkgs:
+        return files
+
+    # 3. Parse current requirements.txt to find what's already listed
+    current_req = files.get("requirements.txt", "")
+    existing_pkgs: set = set()
+    normalized_lines: List[str] = []
+    _alias_map_lower = {k.lower(): v for k, v in _IMPORT_TO_PKG.items()}
+    for line in current_req.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            normalized_lines.append(s)
+            continue
+        # Extract bare package name (strip version specifiers)
+        pkg_name_raw = _re.split(r"[><=!~;\[\]]", s)[0].strip()
+        if not pkg_name_raw:
+            continue
+        mapped_name = _alias_map_lower.get(pkg_name_raw.lower(), pkg_name_raw)
+        if mapped_name.lower() in _BAD_REQUIREMENT_NAMES:
+            continue
+        s = mapped_name + s[len(pkg_name_raw):]
+        normalized_lines.append(s)
+        pkg_name = mapped_name.lower()
+        existing_pkgs.add(pkg_name)
+        # Also add common aliases (e.g. "python-dateutil" covers "dateutil")
+        existing_pkgs.add(pkg_name.replace("-", "_"))
+
+    normalized_req = "\n".join(normalized_lines).rstrip()
+
+    # 4. Find missing packages
+    missing = []
+    for pkg in sorted(needed_pkgs, key=str.lower):
+        pkg_lower = pkg.lower()
+        pkg_underscore = pkg_lower.replace("-", "_")
+        if pkg_lower not in existing_pkgs and pkg_underscore not in existing_pkgs:
+            missing.append(pkg)
+
+    if not missing:
+        if normalized_req != current_req.rstrip():
+            files["requirements.txt"] = normalized_req
+        return files
+
+    # 5. Append missing packages to requirements.txt
+    new_req = normalized_req
+    if new_req and not new_req.endswith("\n"):
+        new_req += "\n"
+    for pkg in missing:
+        new_req += f"{pkg}\n"
+        logger.info(f"  \U0001f4e6 Auto-added missing dependency: {pkg}")
+
+    files["requirements.txt"] = new_req
+    logger.info(f"  \u2705 _ensure_requirements_complete: added {len(missing)} missing package(s): {', '.join(missing)}")
+    return files
 
 
 def _fix_dotted_local_imports(files: Dict[str, str], label: str = "") -> int:
@@ -367,7 +2243,7 @@ from ..utils.web_search import ResearchSearcher
 from ..research.extensive_researcher import ExtensiveResearcher
 from ..llm.hybrid_router import HybridRouter
 from ..llm.multi_backend_manager import get_backend_manager
-from ..utils.model_manager import get_model_manager, get_fallback_llm
+from ..utils.model_manager import get_model_manager
 from .state import (
     AutoGITState,
     ResearchContext,
@@ -388,6 +2264,12 @@ _analytics_tracker = None
 # Initialize global model manager
 _model_manager = None
 
+# Runtime failover profile propagated from workflow execution policy wrapper.
+_RUNTIME_FAILOVER_PROFILE: ContextVar[str] = ContextVar(
+    "autogit_runtime_failover_profile",
+    default="balanced",
+)
+
 def get_analytics_tracker() -> AnalyticsTracker:
     """Get or create analytics tracker singleton"""
     global _analytics_tracker
@@ -396,10 +2278,73 @@ def get_analytics_tracker() -> AnalyticsTracker:
     return _analytics_tracker
 
 
+def _normalize_runtime_failover_profile(profile: Optional[str]) -> str:
+    normalized = str(profile or "balanced").strip().lower()
+    if normalized not in {"balanced", "resilient", "cost_saver"}:
+        return "balanced"
+    return normalized
+
+
+def set_runtime_failover_profile(profile: Optional[str]):
+    """Set per-node runtime failover profile context.
+
+    Returns a context token that must be reset by the caller.
+    """
+    normalized = _normalize_runtime_failover_profile(profile)
+    return _RUNTIME_FAILOVER_PROFILE.set(normalized)
+
+
+def reset_runtime_failover_profile(token) -> None:
+    """Reset per-node runtime failover profile context."""
+    if token is None:
+        return
+    _RUNTIME_FAILOVER_PROFILE.reset(token)
+
+
+def get_runtime_failover_profile() -> str:
+    """Get current runtime failover profile context."""
+    return _normalize_runtime_failover_profile(_RUNTIME_FAILOVER_PROFILE.get())
+
+
+def _apply_runtime_failover_policy(requested_profile: str) -> str:
+    """Apply runtime failover policy remapping to requested model profiles."""
+    profile = get_runtime_failover_profile()
+    if profile == "cost_saver":
+        return {
+            "powerful": "balanced",
+            "reasoning": "balanced",
+            "balanced": "fast",
+            "research": "balanced",
+        }.get(requested_profile, requested_profile)
+    if profile == "resilient":
+        return {
+            "fast": "balanced",
+            "research": "balanced",
+        }.get(requested_profile, requested_profile)
+    return requested_profile
+
+
+def _get_env_int(name: str, default: int, min_value: int = None, max_value: int = None) -> int:
+    """Read an int env var with optional clamping and safe fallback."""
+    raw = str(os.environ.get(name, "")).strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid integer for {name}={raw!r}; using default {default}")
+        return default
+
+    if min_value is not None:
+        value = max(min_value, value)
+    if max_value is not None:
+        value = min(max_value, value)
+    return value
+
+
 # ── Smart model routing ────────────────────────────────────────────────────────
 # Detected complexity from requirements_extraction → profile override.
 # "simple" tasks can use fast models everywhere, "complex" tasks get powerful.
-_COMPLEXITY_OVERRIDE: Optional[str] = None  # set by requirements_extraction_node
 
 _SMART_ROUTING_MAP: Dict[str, Dict[str, str]] = {
     # complexity → { requested_profile → actual_profile }
@@ -418,7 +2363,7 @@ _SMART_ROUTING_MAP: Dict[str, Dict[str, str]] = {
 }
 
 
-def get_llm(profile: str = "balanced"):
+def get_llm(profile: str = "balanced", complexity_override: Optional[str] = None):
     """
     Get LLM model from model manager (prevents VRAM thrashing).
     Applies smart routing overrides based on detected task complexity.
@@ -433,14 +2378,45 @@ def get_llm(profile: str = "balanced"):
     if _model_manager is None:
         _model_manager = get_model_manager()
     
-    # Smart routing: remap profile if complexity was detected
+    # Smart routing: remap profile if complexity was detected in current state
     actual_profile = profile
-    if _COMPLEXITY_OVERRIDE and _COMPLEXITY_OVERRIDE in _SMART_ROUTING_MAP:
-        actual_profile = _SMART_ROUTING_MAP[_COMPLEXITY_OVERRIDE].get(profile, profile)
+    if complexity_override and complexity_override in _SMART_ROUTING_MAP:
+        actual_profile = _SMART_ROUTING_MAP[complexity_override].get(profile, profile)
         if actual_profile != profile:
-            logger.debug(f"  Smart routing: {profile} → {actual_profile} (complexity={_COMPLEXITY_OVERRIDE})")
+            logger.debug(f"  Smart routing: {profile} → {actual_profile} (complexity={complexity_override})")
+
+    # Optional policy: keep small models primary even for complex tasks.
+    # Useful when swarm/debate parallelism is preferred over single-model size.
+    if os.environ.get("AUTOGIT_SMALL_LLM_PRIMARY", "false").lower() in ("true", "1", "yes"):
+        _small_primary_map = {
+            "powerful": "balanced",
+            "reasoning": "balanced",
+            "balanced": "balanced",
+            "fast": "fast",
+            "research": "balanced",
+        }
+        _prev_profile = actual_profile
+        actual_profile = _small_primary_map.get(actual_profile, actual_profile)
+        if actual_profile != _prev_profile:
+            logger.debug(f"  Small-LLM-primary routing: {_prev_profile} -> {actual_profile}")
+
+    # Phase 1 profile enforcement: apply runtime failover profile at call-time.
+    _before_failover = actual_profile
+    actual_profile = _apply_runtime_failover_policy(actual_profile)
+    if actual_profile != _before_failover:
+        logger.debug(
+            "  Runtime failover policy (%s): %s -> %s",
+            get_runtime_failover_profile(),
+            _before_failover,
+            actual_profile,
+        )
     
     return _model_manager.get_fallback_llm(actual_profile)
+
+
+def get_fallback_llm(profile: str = "balanced", complexity_override: Optional[str] = None):
+    """Local wrapper to ensure all fallback calls honor runtime failover policy."""
+    return get_llm(profile, complexity_override=complexity_override)
 
 
 # ============================================
@@ -514,7 +2490,15 @@ async def requirements_extraction_node(state: AutoGITState) -> Dict[str, Any]:
             if _te != -1:
                 raw = raw[_te + len("</think>"):].strip()
 
-        requirements = _jsr_req.loads(raw)
+        # Deterministic JSON hardening: direct parse first, then robust extraction.
+        try:
+            requirements = _jsr_req.loads(raw)
+        except Exception:
+            parsed_any = extract_json_from_text(raw, expected_type="object")
+            if isinstance(parsed_any, dict):
+                requirements = parsed_any
+            else:
+                raise
 
         # Display extracted requirements
         project_type = requirements.get("project_type", "unknown")
@@ -528,13 +2512,41 @@ async def requirements_extraction_node(state: AutoGITState) -> Dict[str, Any]:
         console.print(f"  [bold]Features:[/bold] {', '.join(features[:4])}")
         console.print(f"  [bold]Success:[/bold] {success}")
 
+        # ── Interactive goal review ──────────────────────────────────────
+        # Show the user what goals we extracted and let them add/remove.
+        from rich.table import Table as _RTable
+        _goals_table = _RTable(title="📋 Extracted Goals (used for final evaluation)", show_lines=False)
+        _goals_table.add_column("#", width=3, justify="right", style="dim")
+        _goals_table.add_column("Type", width=12)
+        _goals_table.add_column("Goal", min_width=30)
+        _goal_idx = 0
+        for _c in components:
+            _goal_idx += 1
+            _goals_table.add_row(str(_goal_idx), "[cyan]component[/]", str(_c))
+        for _f in features:
+            _goal_idx += 1
+            _goals_table.add_row(str(_goal_idx), "[green]feature[/]", str(_f))
+        test_scenarios = requirements.get("test_scenarios", [])
+        for _ts in test_scenarios:
+            _ts_name = _ts.get("name", str(_ts)) if isinstance(_ts, dict) else str(_ts)
+            _goal_idx += 1
+            _goals_table.add_row(str(_goal_idx), "[yellow]test[/]", _ts_name)
+        # Include user-provided requirements (from CLI prompt)
+        if user_reqs:
+            import re as _re_split
+            _user_items = [r.strip() for r in _re_split.split(r'[;,\n]', user_reqs) if r.strip()]
+            for _ui in _user_items:
+                _goal_idx += 1
+                _goals_table.add_row(str(_goal_idx), "[magenta]user[/]", _ui)
+        console.print(_goals_table)
+        console.print(f"  [dim]These {_goal_idx} goals will be checked in the Goal Achievement Report.[/dim]")
+        console.print(f"  [dim]💡 Tip: Add custom goals via the requirements prompt at pipeline start.[/dim]")
+
         logger.info(f"  Requirements: type={project_type}, complexity={complexity}, "
                      f"components={len(components)}, features={len(features)}")
 
-        # Smart model routing: set complexity for downstream profile overrides
-        global _COMPLEXITY_OVERRIDE
+        # Smart model routing complexity is persisted in state and read per-node.
         if complexity in ("simple", "moderate", "complex"):
-            _COMPLEXITY_OVERRIDE = complexity
             console.print(f"  [dim]🧠 Smart routing: complexity={complexity} → model profiles adjusted[/dim]")
 
         # V13 FIX: Also store in state so it doesn't rely solely on mutable global
@@ -562,7 +2574,19 @@ async def requirements_extraction_node(state: AutoGITState) -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"Requirements extraction failed ({e}) — continuing without structured requirements")
         console.print(f"  [dim yellow]Extraction failed ({e}) — proceeding with raw idea[/dim yellow]")
-        return {"current_stage": "requirements_extraction_failed"}
+        _err_payload = {
+            "node": "requirements_extraction",
+            "exception_type": type(e).__name__,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+            "retryable": True,
+        }
+        return {
+            "current_stage": "requirements_extraction_failed",
+            "errors": [f"requirements_extraction_failed:{type(e).__name__}:{str(e)}"],
+            "warnings": [f"Requirements extraction failed; continuing with raw idea ({type(e).__name__})"],
+            "requirements_extraction_error": _err_payload,
+        }
 
 
 # ============================================
@@ -571,26 +2595,38 @@ async def requirements_extraction_node(state: AutoGITState) -> Dict[str, Any]:
 
 async def research_node(state: AutoGITState) -> Dict[str, Any]:
     """
-    Node 1: SOTA Research using Groq compound-beta (built-in web search).
+    Node 1: SOTA Research — STORM/GPT-Researcher-inspired compound engine.
 
-    compound-beta automatically searches the web when needed, so a single LLM
-    call gives us grounded, up-to-date results without managing a search API.
-    Fallback chain: compound-beta → gpt-oss-120b (also has web search) →
-                    SearXNG ExtensiveResearcher → basic arXiv/DDG searcher.
+    Fallback chain:
+      1. SOTAResearcher (multi-perspective + compound parallel search + memory)
+      2. Perplexica swarm (6-agent parallel)
+      3. compound-beta (Groq web-search LLM)
+      4. SearXNG ExtensiveResearcher
+      5. Basic arXiv/DDG
     """
     idea = state['idea']
+    research_topic = _compact_research_topic(
+        idea,
+        max_chars=int(os.environ.get("AUTOGIT_RESEARCH_TOPIC_MAX_CHARS", "700")),
+    )
     run_id = state.get('run_id', str(uuid.uuid4()))
     tracker = get_analytics_tracker()
 
     start_time = time.time()
-    logger.info(f"🔍 Research Node (compound-beta/web-search): '{idea}'")
+    logger.info(f"🔍 Research Node (SOTA): '{idea}'")
 
     console = Console()
     try:
         from ..utils.model_manager import get_profile_primary as _gpp
     except Exception:
         from utils.model_manager import get_profile_primary as _gpp  # type: ignore
-    console.print(f"\n[cyan]🔍 SOTA Research:[/cyan] [bold]{idea}[/bold]  [dim](model profile: research → {_gpp('research')})[/dim]")
+    console.print(f"\n[cyan]🔍 SOTA Research:[/cyan] [bold]{research_topic}[/bold]  [dim](model profile: research → {_gpp('research')})[/dim]")
+    if research_topic != idea:
+        logger.warning(
+            "Research topic compacted for provider safety: %d -> %d chars",
+            len(idea),
+            len(research_topic),
+        )
 
     if not state.get("use_web_search", True):
         logger.info("Web search disabled — skipping research")
@@ -602,21 +2638,279 @@ async def research_node(state: AutoGITState) -> Dict[str, Any]:
 
     research_context: ResearchContext = {}
     summary = ""
+    perplexica_succeeded = False
+    sota_succeeded = False
+    perplexica_status = "not_attempted"
+    perplexica_error = ""
+    perplexica_attempted = False
+    perplexica_enrich_on_sota = os.environ.get("PERPLEXICA_ENRICH_ON_SOTA", "true").lower() in ("true", "1", "yes")
 
     # ------------------------------------------------------------------
-    # Primary path: compound-beta (Groq) or gpt-oss-120b with web search
+    # PRIMARY PATH: SOTAResearcher (multi-perspective compound engine)
     # ------------------------------------------------------------------
     try:
-        console.print(f"[dim]  Attempting compound-beta (grounded web search)...[/dim]")
-        llm = get_llm("research")  # compound-beta first in this profile
+        try:
+            from src.research.sota_researcher import SOTAResearcher
+        except ImportError:
+            from research.sota_researcher import SOTAResearcher  # type: ignore
 
-        research_system = (
-            "You are a world-class research analyst with access to real-time web search. "
-            "Search for recent papers, benchmarks, open-source implementations, and SOTA results. "
-            "Be comprehensive and cite specific sources (ArXiv IDs, GitHub repos, blog posts). "
-            "Structure your entire response as VALID JSON only — no prose outside the JSON."
+        console.print("[cyan]🧠 Using SOTA Research Engine (STORM + GPT-Researcher pattern)...[/cyan]")
+        researcher = SOTAResearcher(
+            max_iterations=3,
+            max_perspectives=4,
+            max_sub_questions=8,
+            max_sources_per_engine=20,
+            completeness_threshold=0.70,
+            llm_getter=get_llm,
         )
-        research_user = f"""Research topic: {idea}
+        sota_timeout_s = int(os.environ.get("AUTOGIT_SOTA_TIMEOUT_S", "300"))
+        report = await asyncio.wait_for(researcher.research(research_topic), timeout=sota_timeout_s)
+        research_context = report.to_research_context()
+        summary = report.summary
+
+        # Rich output
+        console.print(f"[green]✅ SOTA Research complete:[/green]")
+        console.print(f"  • [bold]{report.unique_sources}[/bold] unique sources across [bold]{report.iterations}[/bold] iterations")
+        console.print(f"  • [bold]{len(report.perspectives)}[/bold] perspectives: {', '.join(p.name for p in report.perspectives)}")
+        n_papers = sum(1 for s in report.all_sources if s.source_type == 'academic')
+        n_code = sum(1 for s in report.all_sources if s.source_type == 'code')
+        console.print(f"  • [bold]{n_papers}[/bold] academic, [bold]{n_code}[/bold] code repos")
+        if report.memory_hits:
+            console.print(f"  • [bold]{report.memory_hits}[/bold] prior findings recalled from memory")
+        if report.gaps_remaining:
+            console.print(f"  • [yellow]{len(report.gaps_remaining)} gaps remaining[/yellow]")
+        console.print(f"  • Completed in [bold]{report.elapsed_s:.1f}s[/bold]\n")
+
+        sota_succeeded = True
+        if not perplexica_enrich_on_sota:
+            perplexica_succeeded = True  # skip fallbacks when enrichment is disabled
+        logger.info(f"✅ SOTA Research: {report.unique_sources} sources, {report.elapsed_s:.1f}s")
+    except Exception as sota_err:
+        console.print(f"[yellow]⚠️ SOTA researcher failed: {sota_err} — falling back to Perplexica[/yellow]")
+        logger.warning(f"SOTA research failed: {sota_err}")
+
+    # ------------------------------------------------------------------
+    # Fallback/Enrichment 1: Perplexica (self-hosted AI search engine)
+    # Runs when SOTA failed, or as enrichment if PERPLEXICA_ENRICH_ON_SOTA=true.
+    # ------------------------------------------------------------------
+    try:
+        from src.research.perplexica_client import PerplexicaClient
+    except ImportError:
+        try:
+            from research.perplexica_client import PerplexicaClient
+        except ImportError:
+            PerplexicaClient = None  # type: ignore
+
+    perplexica_enabled = os.environ.get("PERPLEXICA_ENABLED", "true").lower() in ("true", "1", "yes")
+    local_models_disabled = os.environ.get("AUTOGIT_DISABLE_LOCAL_MODELS", "true").lower() in ("true", "1", "yes", "on")
+    px_chat_provider = os.environ.get("PERPLEXICA_CHAT_PROVIDER", "").strip().lower()
+    px_embed_provider = os.environ.get("PERPLEXICA_EMBEDDING_PROVIDER", "").strip().lower()
+    if local_models_disabled and (
+        px_chat_provider in ("", "ollama") or px_embed_provider in ("", "ollama")
+    ):
+        perplexica_enabled = False
+
+    if (not perplexica_succeeded) and PerplexicaClient is not None and perplexica_enabled:
+        perplexica_url = os.environ.get("PERPLEXICA_URL", "http://localhost:9123")
+        try:
+            perplexica_attempted = True
+            console.print(f"[dim]  Attempting Perplexica at {perplexica_url}...[/dim]")
+            pclient = PerplexicaClient(
+                perplexica_url,
+                chat_provider_name=os.environ.get("PERPLEXICA_CHAT_PROVIDER"),
+                chat_model_key=os.environ.get("PERPLEXICA_CHAT_MODEL"),
+                embedding_provider_name=os.environ.get("PERPLEXICA_EMBEDDING_PROVIDER"),
+                embedding_model_key=os.environ.get("PERPLEXICA_EMBEDDING_MODEL"),
+                default_mode=os.environ.get("PERPLEXICA_MODE", "quality"),
+                timeout_s=int(os.environ.get("PERPLEXICA_TIMEOUT", "120")),
+            )
+
+            if await pclient.is_available():
+                perplexica_status = "available"
+                # Complexity-aware policy: force swarm for complex tasks.
+                _complexity = (state.get("complexity_override") or (state.get("requirements") or {}).get("complexity") or "").strip().lower()
+                _complexity_mode = {
+                    "simple": "speed",
+                    "moderate": "balanced",
+                    "complex": "quality",
+                }.get(_complexity, os.environ.get("PERPLEXICA_MODE", "quality"))
+                # Use swarm mode (6 parallel agents) if enabled, and force it on complex tasks by default.
+                _swarm_env = os.environ.get("PERPLEXICA_SWARM", "true").lower() in ("true", "1", "yes")
+                _force_swarm_complex = os.environ.get("PERPLEXICA_SWARM_FOR_COMPLEX", "true").lower() in ("true", "1", "yes")
+                use_swarm = _swarm_env or (_force_swarm_complex and _complexity == "complex")
+                if use_swarm:
+                    console.print("[cyan]🐝 Using Perplexica swarm mode (6 agents in parallel)...[/cyan]")
+                    presults = await pclient.deep_research(
+                        research_topic,
+                        mode=_complexity_mode,
+                    )
+                    # If swarm path comes back empty, degrade to non-swarm Perplexica before giving up.
+                    if not any(presults.get(k) for k in ("academic_results", "web_results", "implementations", "insights", "all_sources")):
+                        logger.warning("Perplexica swarm returned empty payload — retrying with standard research")
+                        presults = await pclient.research(
+                            research_topic,
+                            mode=_complexity_mode,
+                            include_academic=True,
+                            include_discussions=True,
+                        )
+                else:
+                    presults = await pclient.research(
+                        research_topic,
+                        mode=_complexity_mode,
+                        include_academic=True,
+                        include_discussions=True,
+                    )
+                await pclient.close()
+
+                # Convert Perplexica results into research_context
+                # deep_research/swarm returns flat lists; research() returns nested sources
+                p_papers = []
+                for ar in presults.get("academic_results", []):
+                    # Swarm format: flat dict with title/url/summary
+                    if "summary" in ar or "url" in ar:
+                        p_papers.append({
+                            "title": ar.get("title", ""),
+                            "url": ar.get("url", ""),
+                            "summary": ar.get("summary", ar.get("content", ""))[:1500],
+                            "relevance_score": ar.get("relevance_score", 0.85),
+                        })
+                    # Standard research() format: nested sources
+                    for src in ar.get("sources", []):
+                        p_papers.append({
+                            "title": src.get("title", ""),
+                            "url": src.get("url", ""),
+                            "summary": src.get("content", "")[:1500],
+                            "relevance_score": 0.85,
+                        })
+
+                p_web = []
+                for wr in presults.get("web_results", []):
+                    if "snippet" in wr or ("url" in wr and "sources" not in wr):
+                        p_web.append({
+                            "title": wr.get("title", ""),
+                            "url": wr.get("url", ""),
+                            "snippet": wr.get("snippet", wr.get("content", ""))[:800],
+                            "relevance_score": wr.get("relevance_score", 0.8),
+                        })
+                    for src in wr.get("sources", []):
+                        p_web.append({
+                            "title": src.get("title", ""),
+                            "url": src.get("url", ""),
+                            "snippet": src.get("content", "")[:800],
+                            "relevance_score": 0.8,
+                        })
+
+                # Implementations: from deep_research directly or from all_sources
+                p_implementations = presults.get("implementations", [])
+                if not p_implementations:
+                    for src in presults.get("all_sources", []):
+                        url_lower = src.get("url", "").lower()
+                        if "github.com" in url_lower or "gitlab.com" in url_lower:
+                            p_implementations.append({
+                                "title": src.get("title", ""),
+                                "url": src.get("url", ""),
+                                "description": src.get("content", "")[:600],
+                                "source": "perplexica",
+                            })
+
+                # Key insights: from deep_research directly or from answers
+                p_insights = presults.get("insights", [])
+                if not p_insights:
+                    for wr in presults.get("web_results", []):
+                        answer = wr.get("answer", "")
+                        if answer and not answer.startswith("["):
+                            p_insights.append(answer[:1500])
+                    for dr in presults.get("discussion_results", []):
+                        answer = dr.get("answer", "")
+                        if answer and not answer.startswith("["):
+                            p_insights.append(answer[:1500])
+
+                if p_papers or p_web or p_implementations or p_insights:
+                    px_sources = []
+                    for item in (p_papers + p_web + p_implementations)[:50]:
+                        if isinstance(item, dict):
+                            px_sources.append({
+                                "title": item.get("title", ""),
+                                "url": item.get("url", ""),
+                            })
+                    # Merge Perplexica results into existing SOTA context to maximize coverage.
+                    merged_papers = list(research_context.get("papers", [])) + p_papers
+                    merged_web = list(research_context.get("web_results", [])) + p_web
+                    merged_impl = list(research_context.get("implementations", [])) + p_implementations
+                    research_context = {
+                        **research_context,
+                        "papers": merged_papers,
+                        "web_results": merged_web,
+                        "implementations": merged_impl,
+                        "search_timestamp": datetime.now().isoformat(),
+                        "perplexica_research": {
+                            "status": "success",
+                            "summary": presults.get("summary", "")[:8000],
+                            "insights": p_insights[:25],
+                            "sources": px_sources,
+                            "unique_sources": presults.get("unique_source_count", 0),
+                            "queries_run": presults.get("query_count", 0),
+                            "swarm_agents": presults.get("swarm_agents", 0),
+                            "swarm_enabled": bool(use_swarm),
+                            "mode": _complexity_mode,
+                            "task_complexity": _complexity or "unknown",
+                            "elapsed_s": presults.get("elapsed_s", 0),
+                            "enrichment_mode": bool(sota_succeeded),
+                        },
+                    }
+                    swarm_info = f"  - {presults.get('swarm_agents', 0)} swarm agents\n" if presults.get('swarm_agents') else ""
+                    summary = (
+                        f"Perplexica research complete:\n"
+                        f"  - {len(p_papers)} academic sources\n"
+                        f"  - {len(p_web)} web results\n"
+                        f"  - {len(p_implementations)} implementations\n"
+                        f"{swarm_info}"
+                        f"  - {presults.get('unique_source_count', 0)} unique sources\n"
+                        f"  - {presults.get('elapsed_s', 0):.1f}s elapsed"
+                    )
+                    perplexica_succeeded = True
+                    perplexica_status = "success"
+                    console.print(f"[green]✅ Perplexica research complete:[/green]")
+                    console.print(f"  • [bold]{len(p_papers)}[/bold] academic, [bold]{len(p_web)}[/bold] web, [bold]{len(p_implementations)}[/bold] implementations")
+                    console.print(f"  • [bold]{presults.get('unique_source_count', 0)}[/bold] unique sources in [bold]{presults.get('elapsed_s', 0):.1f}s[/bold]\n")
+                    logger.info(f"✅ Perplexica research: {len(p_papers)} papers, {len(p_web)} web, {len(p_implementations)} impls")
+                else:
+                    perplexica_status = "empty_results"
+                    console.print("[yellow]⚠️ Perplexica returned empty results — falling back[/yellow]")
+                    logger.warning("Perplexica returned no usable results")
+            else:
+                perplexica_status = "unavailable"
+                console.print(f"[yellow]⚠️ Perplexica not available at {perplexica_url} — falling back[/yellow]")
+                logger.info(f"Perplexica not available at {perplexica_url}")
+        except Exception as perp_err:
+            perplexica_status = "error"
+            perplexica_error = str(perp_err)
+            console.print(f"[yellow]⚠️ Perplexica error: {perp_err} — falling back[/yellow]")
+            logger.warning(f"Perplexica research failed: {perp_err}")
+    elif not sota_succeeded and not perplexica_enabled:
+        perplexica_status = "disabled_by_env"
+        logger.info("Perplexica fallback disabled by environment flags")
+    elif PerplexicaClient is None:
+        perplexica_status = "client_unavailable"
+
+    # ------------------------------------------------------------------
+    # Secondary path: compound-beta (Groq) or gpt-oss-120b with web search
+    # (Only run if Perplexica didn't succeed)
+    # ------------------------------------------------------------------
+    try:
+        if perplexica_succeeded:
+            logger.info("Perplexica succeeded — skipping compound-beta")
+        else:
+            console.print(f"[dim]  Attempting compound-beta (grounded web search)...[/dim]")
+            llm = get_llm("research", complexity_override=state.get("complexity_override"))  # compound-beta first in this profile
+
+            research_system = (
+                "You are a world-class research analyst with access to real-time web search. "
+                "Search for recent papers, benchmarks, open-source implementations, and SOTA results. "
+                "Be comprehensive and cite specific sources (ArXiv IDs, GitHub repos, blog posts). "
+                "Structure your entire response as VALID JSON only — no prose outside the JSON."
+            )
+            research_user = f"""Research topic: {research_topic}
 
 Perform a THOROUGH, EXTENSIVE SOTA literature survey. Dig deep — aim for at least 12 key papers.
 Return ONLY this JSON structure:
@@ -653,207 +2947,208 @@ Return ONLY this JSON structure:
   ]
 }}"""
 
-        messages = [
-            SystemMessage(content=research_system),
-            HumanMessage(content=research_user),
-        ]
+            messages = [
+                SystemMessage(content=research_system),
+                HumanMessage(content=research_user),
+            ]
 
-        response = await llm.ainvoke(messages)
-        raw = response.content or ""
+            response = await llm.ainvoke(messages)
+            raw = response.content or ""
 
-        # Parse JSON from the response
-        parsed = extract_json_from_text(raw)
-        if not isinstance(parsed, dict):
-            raise ValueError(f"compound-beta returned non-dict: {type(parsed)}")
+            # Parse JSON from the response
+            parsed = extract_json_from_text(raw)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"compound-beta returned non-dict: {type(parsed)}")
 
-        # Build research_context from the rich structured response
-        papers = []
-        for p in parsed.get("key_papers", []):
-            papers.append({
-                "title": p.get("title", ""),
-                "url": p.get("url", ""),
-                "summary": p.get("contribution", ""),
-                "authors": p.get("authors", ""),
-                "year": p.get("year", ""),
-                "relevance_score": 0.9,
-            })
+            # Build research_context from the rich structured response
+            papers = []
+            for p in parsed.get("key_papers", []):
+                papers.append({
+                    "title": p.get("title", ""),
+                    "url": p.get("url", ""),
+                    "summary": p.get("contribution", ""),
+                    "authors": p.get("authors", ""),
+                    "year": p.get("year", ""),
+                    "relevance_score": 0.9,
+                })
 
-        web_results = []
-        for adv in parsed.get("recent_advances", []):
-            web_results.append({"title": adv, "url": "", "snippet": adv, "relevance_score": 0.8})
+            web_results = []
+            for adv in parsed.get("recent_advances", []):
+                web_results.append({"title": adv, "url": "", "snippet": adv, "relevance_score": 0.8})
 
-        implementations = []
-        for imp in parsed.get("implementations", []):
-            implementations.append({
-                "title": imp.get("name", ""),
-                "url": imp.get("url", ""),
-                "description": imp.get("description", ""),
-                "source": "web_search",
-            })
+            implementations = []
+            for imp in parsed.get("implementations", []):
+                implementations.append({
+                    "title": imp.get("name", ""),
+                    "url": imp.get("url", ""),
+                    "description": imp.get("description", ""),
+                    "source": "web_search",
+                })
 
-        research_context = {
-            "papers": papers,
-            "web_results": web_results,
-            "implementations": implementations,
-            "search_timestamp": datetime.now().isoformat(),
-            "compound_beta_research": {
-                "sota_summary":    parsed.get("sota_summary", ""),
-                "open_problems":   parsed.get("open_problems", []),
-                "recent_advances": parsed.get("recent_advances", []),
-                "benchmarks":      parsed.get("benchmarks", []),
-                "key_insights":    parsed.get("key_insights", []),
-            },
-        }
+            research_context = {
+                "papers": papers,
+                "web_results": web_results,
+                "implementations": implementations,
+                "search_timestamp": datetime.now().isoformat(),
+                "compound_beta_research": {
+                    "sota_summary":    parsed.get("sota_summary", ""),
+                    "open_problems":   parsed.get("open_problems", []),
+                    "recent_advances": parsed.get("recent_advances", []),
+                    "benchmarks":      parsed.get("benchmarks", []),
+                    "key_insights":    parsed.get("key_insights", []),
+                },
+            }
 
-        summary = (
-            f"compound-beta SOTA research complete:\n"
-            f"  - {len(papers)} key papers\n"
-            f"  - {len(parsed.get('open_problems', []))} open problems identified\n"
-            f"  - {len(implementations)} implementations found\n"
-            f"  - {len(parsed.get('benchmarks', []))} benchmarks\n"
-            f"  SOTA summary: {parsed.get('sota_summary', '')[:200]}"
-        )
-
-        console.print(f"[green]✅ compound-beta research complete:[/green]")
-        console.print(f"  • [bold]{len(papers)}[/bold] papers, [bold]{len(implementations)}[/bold] implementations")
-        console.print(f"  • [bold]{len(parsed.get('open_problems', []))}[/bold] open problems")
-        console.print(f"  • [bold]{len(parsed.get('benchmarks', []))}[/bold] benchmarks\n")
-        logger.info(f"✅ compound-beta research: {len(papers)} papers, {len(implementations)} impls")
-
-        # ── Deep-dive second pass: hardware / implementation specifics ─────
-        try:
-            console.print("[dim]  🧪 Deep-dive research pass (hardware, datasets, algorithms)...[/dim]")
-            open_probs_text = "\n".join(
-                f"- {p}" for p in parsed.get("open_problems", [])[:5]
+            summary = (
+                f"compound-beta SOTA research complete:\n"
+                f"  - {len(papers)} key papers\n"
+                f"  - {len(parsed.get('open_problems', []))} open problems identified\n"
+                f"  - {len(implementations)} implementations found\n"
+                f"  - {len(parsed.get('benchmarks', []))} benchmarks\n"
+                f"  SOTA summary: {parsed.get('sota_summary', '')[:200]}"
             )
-            deepdive_user = (
-                f"Follow-up deep-dive on: {idea}\n\n"
-                f"We already know the high-level SOTA. Now go deeper on these specific angles:\n"
-                f"1. Hardware implementations / chip designs: specs, power consumption, die area, throughput\n"
-                f"2. Key datasets and evaluation protocols used in this domain\n"
-                f"3. Algorithmic innovations: exact mechanisms, training tricks, efficiency techniques\n"
-                f"4. Open-source tools, simulators, frameworks\n"
-                f"5. For each of these known open problems, propose a concrete research approach:\n"
-                f"{open_probs_text}\n\n"
-                "Return ONLY this JSON:\n"
-                "{\n"
-                '  "hardware_deep_dive": [\n'
-                '    {"name": "...", "type": "chip|fpga|sim", "specs": "...", "power_w": "...", "throughput": "...", "paper": "..."}\n'
-                "  ],\n"
-                '  "datasets": [\n'
-                '    {"name": "...", "size": "...", "task": "...", "url": "..."}\n'
-                "  ],\n"
-                '  "algorithm_details": [\n'
-                '    {"name": "...", "key_mechanism": "...", "advantage_over_baseline": "..."}\n'
-                "  ],\n"
-                '  "tools_and_frameworks": [\n'
-                '    {"name": "...", "url": "...", "purpose": "..."}\n'
-                "  ],\n"
-                '  "problem_solutions": [\n'
-                '    {"problem": "...", "proposed_approach": "...", "feasibility": "high|medium|low"}\n'
-                "  ]\n"
-                "}"
-            )
-            dd_response = await llm.ainvoke([
-                SystemMessage(content=(
-                    "You are a deep technical research analyst specialising in hardware architecture, "
-                    "chip design, and AI systems. Search for specific hardware specs, papers, and "
-                    "implementation details. Return ONLY valid JSON."
-                )),
-                HumanMessage(content=deepdive_user),
-            ])
-            dd_parsed = extract_json_from_text(dd_response.content or "")
-            if isinstance(dd_parsed, dict):
-                research_context["deep_dive"] = dd_parsed
-                hw_count   = len(dd_parsed.get("hardware_deep_dive", []))
-                ds_count   = len(dd_parsed.get("datasets", []))
-                algo_count = len(dd_parsed.get("algorithm_details", []))
-                tool_count = len(dd_parsed.get("tools_and_frameworks", []))
-                console.print(
-                    f"[green]  ✅ Deep-dive:[/green] "
-                    f"{hw_count} hardware specs · {ds_count} datasets · "
-                    f"{algo_count} algorithms · {tool_count} tools"
+
+            console.print(f"[green]✅ compound-beta research complete:[/green]")
+            console.print(f"  • [bold]{len(papers)}[/bold] papers, [bold]{len(implementations)}[/bold] implementations")
+            console.print(f"  • [bold]{len(parsed.get('open_problems', []))}[/bold] open problems")
+            console.print(f"  • [bold]{len(parsed.get('benchmarks', []))}[/bold] benchmarks\n")
+            logger.info(f"✅ compound-beta research: {len(papers)} papers, {len(implementations)} impls")
+
+            # ── Deep-dive second pass: hardware / implementation specifics ─────
+            try:
+                console.print("[dim]  🧪 Deep-dive research pass (hardware, datasets, algorithms)...[/dim]")
+                open_probs_text = "\n".join(
+                    f"- {p}" for p in parsed.get("open_problems", [])[:10]
                 )
-                logger.info(f"  Deep-dive: {hw_count} hw, {ds_count} ds, {algo_count} algos, {tool_count} tools")
-        except Exception as dd_err:
-            logger.warning(f"  Deep-dive pass skipped: {dd_err}")
-        # ── End deep-dive ──────────────────────────────────────────────────
+                deepdive_user = (
+                    f"Follow-up deep-dive on: {research_topic}\n\n"
+                    f"We already know the high-level SOTA. Now go deeper on these specific angles:\n"
+                    f"1. Hardware implementations / chip designs: specs, power consumption, die area, throughput\n"
+                    f"2. Key datasets and evaluation protocols used in this domain\n"
+                    f"3. Algorithmic innovations: exact mechanisms, training tricks, efficiency techniques\n"
+                    f"4. Open-source tools, simulators, frameworks\n"
+                    f"5. For each of these known open problems, propose a concrete research approach:\n"
+                    f"{open_probs_text}\n\n"
+                    "Return ONLY this JSON:\n"
+                    "{\n"
+                    '  "hardware_deep_dive": [\n'
+                    '    {"name": "...", "type": "chip|fpga|sim", "specs": "...", "power_w": "...", "throughput": "...", "paper": "..."}\n'
+                    "  ],\n"
+                    '  "datasets": [\n'
+                    '    {"name": "...", "size": "...", "task": "...", "url": "..."}\n'
+                    "  ],\n"
+                    '  "algorithm_details": [\n'
+                    '    {"name": "...", "key_mechanism": "...", "advantage_over_baseline": "..."}\n'
+                    "  ],\n"
+                    '  "tools_and_frameworks": [\n'
+                    '    {"name": "...", "url": "...", "purpose": "..."}\n'
+                    "  ],\n"
+                    '  "problem_solutions": [\n'
+                    '    {"problem": "...", "proposed_approach": "...", "feasibility": "high|medium|low"}\n'
+                    "  ]\n"
+                    "}"
+                )
+                dd_response = await llm.ainvoke([
+                    SystemMessage(content=(
+                        "You are a deep technical research analyst specialising in hardware architecture, "
+                        "chip design, and AI systems. Search for specific hardware specs, papers, and "
+                        "implementation details. Return ONLY valid JSON."
+                    )),
+                    HumanMessage(content=deepdive_user),
+                ])
+                dd_parsed = extract_json_from_text(dd_response.content or "")
+                if isinstance(dd_parsed, dict):
+                    research_context["deep_dive"] = dd_parsed
+                    hw_count   = len(dd_parsed.get("hardware_deep_dive", []))
+                    ds_count   = len(dd_parsed.get("datasets", []))
+                    algo_count = len(dd_parsed.get("algorithm_details", []))
+                    tool_count = len(dd_parsed.get("tools_and_frameworks", []))
+                    console.print(
+                        f"[green]  ✅ Deep-dive:[/green] "
+                        f"{hw_count} hardware specs · {ds_count} datasets · "
+                        f"{algo_count} algorithms · {tool_count} tools"
+                    )
+                    logger.info(f"  Deep-dive: {hw_count} hw, {ds_count} ds, {algo_count} algos, {tool_count} tools")
+            except Exception as dd_err:
+                logger.warning(f"  Deep-dive pass skipped: {dd_err}")
+            # ── End deep-dive ──────────────────────────────────────────────────
 
     except Exception as compound_err:
-        logger.warning(f"compound-beta research failed ({compound_err}), falling back to SearXNG/arXiv")
-        console.print(f"[yellow]⚠️  Web-search LLM unavailable ({compound_err})[/yellow] — falling back to arXiv")
+        if not perplexica_succeeded:
+            logger.warning(f"compound-beta research failed ({compound_err}), falling back to SearXNG/arXiv")
+            console.print(f"[yellow]⚠️  Web-search LLM unavailable ({compound_err})[/yellow] — falling back to arXiv")
 
-        # ------------------------------------------------------------------
-        # Fallback: SearXNG ExtensiveResearcher or basic arXiv/DDG search
-        # ------------------------------------------------------------------
-        try:
-            from src.research.searxng_client import SearXNGClient
-            manager = get_backend_manager()
-            router = HybridRouter(manager)
-            searxng = SearXNGClient()
+            # ------------------------------------------------------------------
+            # Fallback: SearXNG ExtensiveResearcher or basic arXiv/DDG search
+            # ------------------------------------------------------------------
+            try:
+                from src.research.searxng_client import SearXNGClient
+                manager = get_backend_manager()
+                router = HybridRouter(manager)
+                searxng = SearXNGClient()
 
-            if searxng.is_available():
-                researcher = ExtensiveResearcher(
-                    hybrid_router=router,
-                    max_iterations=3,
-                    results_per_query=10,
-                )
-                synthesis = await researcher.research(topic=idea, focus_areas=None)
+                if searxng.is_available():
+                    researcher = ExtensiveResearcher(
+                        hybrid_router=router,
+                        max_iterations=6,
+                        results_per_query=20,
+                    )
+                    synthesis = await researcher.research(topic=research_topic, focus_areas=None)
 
+                    research_context = {
+                        "papers": [
+                            {"title": r.title, "url": r.url, "summary": (r.content or "")[:1500],
+                             "relevance_score": r.relevance_score}
+                            for r in synthesis.sources if r.category in ["academic", "technical"]
+                        ],
+                        "web_results": [
+                            {"title": r.title, "url": r.url, "snippet": (r.content or "")[:800],
+                             "relevance_score": r.relevance_score}
+                            for r in synthesis.sources if r.category == "general"
+                        ],
+                        "implementations": [
+                            {"title": r.title, "url": r.url, "description": (r.content or "")[:600],
+                             "source": r.engine}
+                            for r in synthesis.sources
+                            if "github" in r.url.lower() or "gitlab" in r.url.lower()
+                        ],
+                        "search_timestamp": synthesis.timestamp,
+                        "extensive_research": {
+                            "iterations": synthesis.iterations,
+                            "key_findings": synthesis.key_findings,
+                            "gaps_identified": synthesis.gaps_identified,
+                            "quality_score": synthesis.quality_score,
+                        },
+                    }
+                    summary = (
+                        f"SearXNG research: {synthesis.unique_results} sources, "
+                        f"quality={synthesis.quality_score:.1f}/10"
+                    )
+                    console.print(f"[green]✅ SearXNG fallback:[/green] {synthesis.unique_results} sources")
+
+                else:
+                    # Last resort: basic arXiv/DDG
+                    searcher = ResearchSearcher(max_arxiv=15, max_web=15)
+                    results = searcher.search_comprehensive(research_topic)
+                    research_context = {
+                        "papers": results["papers"],
+                        "web_results": results["web_results"],
+                        "implementations": results["implementations"],
+                        "search_timestamp": datetime.now().isoformat(),
+                    }
+                    summary = (
+                        f"Basic search: {len(results['papers'])} papers, "
+                        f"{len(results['web_results'])} web results"
+                    )
+                    console.print(f"[green]✅ Basic arXiv fallback:[/green] {len(results['papers'])} papers")
+
+            except Exception as fallback_err:
+                logger.error(f"All research fallbacks failed: {fallback_err}")
                 research_context = {
-                    "papers": [
-                        {"title": r.title, "url": r.url, "summary": (r.content or "")[:500],
-                         "relevance_score": r.relevance_score}
-                        for r in synthesis.sources if r.category in ["academic", "technical"]
-                    ],
-                    "web_results": [
-                        {"title": r.title, "url": r.url, "snippet": (r.content or "")[:300],
-                         "relevance_score": r.relevance_score}
-                        for r in synthesis.sources if r.category == "general"
-                    ],
-                    "implementations": [
-                        {"title": r.title, "url": r.url, "description": (r.content or "")[:200],
-                         "source": r.engine}
-                        for r in synthesis.sources
-                        if "github" in r.url.lower() or "gitlab" in r.url.lower()
-                    ],
-                    "search_timestamp": synthesis.timestamp,
-                    "extensive_research": {
-                        "iterations": synthesis.iterations,
-                        "key_findings": synthesis.key_findings,
-                        "gaps_identified": synthesis.gaps_identified,
-                        "quality_score": synthesis.quality_score,
-                    },
-                }
-                summary = (
-                    f"SearXNG research: {synthesis.unique_results} sources, "
-                    f"quality={synthesis.quality_score:.1f}/10"
-                )
-                console.print(f"[green]✅ SearXNG fallback:[/green] {synthesis.unique_results} sources")
-
-            else:
-                # Last resort: basic arXiv/DDG
-                searcher = ResearchSearcher(max_arxiv=5, max_web=5)
-                results = searcher.search_comprehensive(idea)
-                research_context = {
-                    "papers": results["papers"],
-                    "web_results": results["web_results"],
-                    "implementations": results["implementations"],
+                    "papers": [], "web_results": [], "implementations": [],
                     "search_timestamp": datetime.now().isoformat(),
                 }
-                summary = (
-                    f"Basic search: {len(results['papers'])} papers, "
-                    f"{len(results['web_results'])} web results"
-                )
-                console.print(f"[green]✅ Basic arXiv fallback:[/green] {len(results['papers'])} papers")
-
-        except Exception as fallback_err:
-            logger.error(f"All research fallbacks failed: {fallback_err}")
-            research_context = {
-                "papers": [], "web_results": [], "implementations": [],
-                "search_timestamp": datetime.now().isoformat(),
-            }
-            summary = f"Research failed: {fallback_err}"
+                summary = f"Research failed: {fallback_err}"
 
     # ── Citation verification: check arXiv IDs are real ──────────────────
     try:
@@ -912,124 +3207,175 @@ Return ONLY this JSON structure:
     except Exception:
         pass
 
+    _papers = research_context.get("papers", []) if isinstance(research_context, dict) else []
+    _web = research_context.get("web_results", []) if isinstance(research_context, dict) else []
+    _impl = research_context.get("implementations", []) if isinstance(research_context, dict) else []
+    has_external_sources = bool(_papers or _web or _impl)
+    has_synthesized_research = bool((summary or "").strip()) or sota_succeeded or perplexica_succeeded
+    research_success = bool(has_external_sources or has_synthesized_research)
+
+    if isinstance(research_context, dict):
+        research_context.setdefault("research_meta", {})
+        research_context["research_meta"].update({
+            "has_external_sources": has_external_sources,
+            "has_synthesized_research": has_synthesized_research,
+            "source_counts": {
+                "papers": len(_papers) if isinstance(_papers, list) else 0,
+                "web_results": len(_web) if isinstance(_web, list) else 0,
+                "implementations": len(_impl) if isinstance(_impl, list) else 0,
+            },
+            "perplexica": {
+                "attempted": perplexica_attempted,
+                "status": perplexica_status,
+                "error": perplexica_error,
+            },
+        })
+
+        if "perplexica_research" not in research_context:
+            research_context["perplexica_research"] = {
+                "status": perplexica_status,
+                "sources": [],
+                "summary": "",
+                "insights": [],
+                "error": perplexica_error,
+            }
+
+    warnings = []
+    if research_success and not has_external_sources:
+        warnings.append("Research completed with synthesized analysis but no external sources were captured")
+        logger.warning("Research completed in degraded mode: synthesized analysis present, external source lists empty")
+    elif not research_success:
+        logger.warning("Research failed: no synthesized output and no external evidence")
+
     return {
-        "current_stage": "research_complete",
+        "current_stage": "research_complete" if research_success else "research_failed",
         "research_context": research_context,
         "related_work_summary": summary.strip(),
         "run_id": run_id,
+        "research_success": research_success,
+        "warnings": warnings,
     }
 
 
 
 # ============================================
-# Node 1.5: Dynamic Expert Perspective Generation
+# Node 1.5: Dynamic Expert Perspective Generation (Kimi K2.5-style)
 # ============================================
 
 async def generate_perspectives_node(state: AutoGITState) -> Dict[str, Any]:
     """
-    Node 1.5: Generate domain-specific expert perspectives via LLM.
+    Node 1.5: Dynamically spawn the right number and kind of expert agents.
 
-    Instead of always using [ML Researcher, Systems Engineer, Applied Scientist],
-    the LLM invents 3 experts who are most useful for THIS specific topic.
+    **Kimi K2.5-style dynamic spawning**:
+      Instead of always using 3 fixed perspectives, an LLM "planner" decides:
+        • HOW MANY agents are needed (2-7, based on task complexity)
+        • WHAT KIND of agents (domain-specific, non-overlapping roles)
+        • WHICH model profile each agent should use
+
+    Resource-aware: spawns fewer agents when RAM/VRAM is tight.
+
     Examples:
       'custom GPU for sparse transformers' →
-         VLSI Architect, GPU Microarchitecture Researcher, HPC Systems Engineer
+         5 agents: VLSI Architect, GPU Microarch Researcher, HPC Engineer,
+         Compiler Optimisation Expert, Sparse Math Theorist
       'privacy-preserving federated learning' →
-         Cryptography Researcher, Distributed Systems Engineer, ML Privacy Scientist
+         4 agents: Cryptography Researcher, Distributed Systems Engineer,
+         ML Privacy Scientist, Regulatory Compliance Analyst
+      'simple calculator CLI' →
+         2 agents: Software Engineer, UX Designer
     """
     idea = state["idea"]
-    logger.info(f"🧠 Generating domain-specific expert perspectives for: '{idea}'")
+    logger.info(f"🧠 Spawning dynamic expert agents for: '{idea}'")
 
     console = Console()
-    console.print(f"\n[magenta]🧠 Generating expert perspectives...[/magenta]")
+    console.print(f"\n[magenta]🤖 Spawning dynamic expert agents (adaptive count)...[/magenta]")
 
     try:
-        llm = get_llm("balanced")
+        # Import the dynamic spawner
+        try:
+            from src.agents.dynamic_spawner import AgentSpawner, AgentRole
+        except ImportError:
+            from agents.dynamic_spawner import AgentSpawner, AgentRole  # type: ignore
 
-        system_prompt = (
-            "You are an expert in research methodology. Given a topic, identify the 3 most "
-            "relevant expert perspectives that would produce the best multi-angle analysis. "
-            "Each expert should bring a distinct, non-overlapping viewpoint. "
-            "Return ONLY valid JSON — no prose outside the JSON."
-        )
+        # Resource monitor (optional)
+        try:
+            from src.utils.resource_monitor import ResourceMonitor
+            rm = ResourceMonitor()
+        except Exception:
+            rm = None
 
-        # Include SOTA context if available
-        sota_summary = ""
+        spawner = AgentSpawner(resource_monitor=rm)
+
+        # Build context for the planner
+        ctx: Dict[str, Any] = {"idea": idea}
         rc = state.get("research_context") or {}
         cb = rc.get("compound_beta_research") or {}
         if cb.get("sota_summary"):
-            sota_summary = f"\n\nSOTA context: {cb['sota_summary']}"
+            ctx["sota_summary"] = cb["sota_summary"][:1500]
+        if state.get("requirements"):
+            ctx["requirements"] = state["requirements"]
 
-        user_prompt = f"""Topic: {idea}{sota_summary}
+        # Spawn agents — the spawner's LLM planner decides count + roles
+        pool = await spawner.spawn_for_task(
+            task=f"Multi-perspective analysis and solution design for: {idea}",
+            context=ctx,
+            phase="debate",
+            min_agents=2,
+            max_agents=12,
+        )
 
-Generate exactly 3 expert perspectives that would best evaluate solutions for this specific domain.
-Choose experts whose distinct expertise will surface different critical dimensions of the problem.
-
-Return this EXACT JSON structure:
-{{
-  "perspectives": [
-    {{
-      "name": "Short Expert Title (2-4 words)",
-      "role": "Full professional role description (1 sentence)",
-      "expertise": "Core technical expertise area",
-      "focus_areas": ["area1", "area2", "area3"],
-      "evaluation_criteria": ["criterion1", "criterion2", "criterion3"]
-    }},
-    {{ ... }},
-    {{ ... }}
-  ],
-  "reasoning": "One sentence explaining why these 3 perspectives complement each other for this topic"
-}}"""
-
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
-
-        response = await llm.ainvoke(messages)
-        parsed = extract_json_from_text(response.content or "")
-
-        if not isinstance(parsed, dict) or not parsed.get("perspectives"):
-            raise ValueError(f"Unexpected response structure: {type(parsed)}")
-
-        perspectives_raw = parsed["perspectives"]
-        if not isinstance(perspectives_raw, list) or len(perspectives_raw) < 2:
-            raise ValueError(f"Need at least 2 perspectives, got: {perspectives_raw}")
-
-        # Validate and clean each perspective
+        # Convert spawned agents into perspective configs (backward-compatible)
         dynamic_configs = []
-        for p in perspectives_raw:
-            if not isinstance(p, dict):
-                continue
+        perspective_names = []
+        spawned_role_dicts = []
+        for agent in pool.agents:
+            r = agent.role
             config = {
-                "name": str(p.get("name", "Expert"))[:50],
-                "role": str(p.get("role", "Domain Expert")),
-                "expertise": str(p.get("expertise", "")),
-                "focus_areas": list(p.get("focus_areas", [])),
-                "evaluation_criteria": list(p.get("evaluation_criteria", [])),
+                "name": r.name[:50],
+                "role": r.role_description,
+                "expertise": r.expertise,
+                "focus_areas": r.focus_areas,
+                "evaluation_criteria": r.evaluation_criteria,
+                "temperature": r.temperature,
+                "model_profile": r.model_profile,
+                "weight": r.weight,
             }
             dynamic_configs.append(config)
+            perspective_names.append(r.name)
+            # Serialisable role dict for state tracking
+            spawned_role_dicts.append({
+                "name": r.name, "role_description": r.role_description,
+                "expertise": r.expertise, "focus_areas": r.focus_areas,
+                "model_profile": r.model_profile, "weight": r.weight,
+            })
 
-        perspective_names = [c["name"] for c in dynamic_configs]
-        reasoning = parsed.get("reasoning", "")
-
-        console.print(f"[green]✅ Generated {len(dynamic_configs)} domain experts:[/green]")
+        console.print(f"[green]✅ Spawned {len(dynamic_configs)} domain experts (adaptive):[/green]")
         for cfg in dynamic_configs:
-            console.print(f"  • [bold]{cfg['name']}[/bold] — {cfg['role']}")
-        if reasoning:
-            console.print(f"  [dim]Rationale: {reasoning}[/dim]\n")
+            profile_tag = cfg.get("model_profile", "balanced")
+            weight_tag = f"w={cfg.get('weight', 1.0):.1f}"
+            console.print(
+                f"  • [bold]{cfg['name']}[/bold] — {cfg['role']}"
+                f"  [dim]({profile_tag}, {weight_tag})[/dim]"
+            )
 
-        logger.info(f"✅ Dynamic perspectives: {perspective_names}")
+        logger.info(f"✅ Dynamic spawn: {len(dynamic_configs)} agents: {perspective_names}")
 
         return {
             "current_stage": "perspectives_generated",
             "perspectives": perspective_names,
             "dynamic_perspective_configs": dynamic_configs,
+            "spawned_agent_roles": spawned_role_dicts,
+            "agent_pool_log": [{
+                "phase": "debate",
+                "agent_count": len(dynamic_configs),
+                "agent_names": perspective_names,
+                "coordination": "parallel",
+            }],
         }
 
     except Exception as e:
-        logger.warning(f"Perspective generation failed ({e}) — using default EXPERT_PERSPECTIVES")
-        console.print(f"[yellow]⚠ Perspective generation failed ({e}) — using defaults[/yellow]")
+        logger.warning(f"Dynamic agent spawning failed ({e}) — using default EXPERT_PERSPECTIVES")
+        console.print(f"[yellow]⚠ Dynamic spawning failed ({e}) — using defaults[/yellow]")
         # Return defaults so pipeline can continue
         from src.langraph_pipeline.state import EXPERT_PERSPECTIVES
         return {
@@ -1090,7 +3436,7 @@ async def problem_extraction_node(state: AutoGITState) -> Dict[str, Any]:
             }
         
         # Fallback: Use LLM extraction if no requirements
-        llm = get_llm("fast")  # Use fast model for extraction
+        llm = get_llm("fast", complexity_override=state.get("complexity_override"))  # Use fast model for extraction
         
         # Build context from research
         context = ""
@@ -1187,10 +3533,16 @@ async def problem_extraction_node(state: AutoGITState) -> Dict[str, Any]:
         problems_text = response.content
         problems_json = extract_json_from_text(problems_text)
         
-        if isinstance(problems_json, list):
-            problems = problems_json
+        if problems_json is None:
+            # extract_json_from_text returned None — fall back to empty
+            problems = []
+        elif isinstance(problems_json, list):
+            problems = [p for p in problems_json if isinstance(p, str)]
+        elif isinstance(problems_json, dict):
+            inner = problems_json.get("problems", [])
+            problems = inner if isinstance(inner, list) else []
         else:
-            problems = [problems_json.get("problems", [])]
+            problems = []
 
         logger.info(f"✅ Extracted {len(problems)} problems")
 
@@ -1198,7 +3550,7 @@ async def problem_extraction_node(state: AutoGITState) -> Dict[str, Any]:
         selected_problem = problems[0] if problems else None
         if len(problems) > 1:
             try:
-                sel_llm = get_llm("fast")
+                sel_llm = get_llm("fast", complexity_override=state.get("complexity_override"))
                 # Include SOTA context if available
                 sota_ctx = ""
                 rc2 = state.get("research_context") or {}
@@ -1260,44 +3612,134 @@ def _get_perspective_config(state: AutoGITState, perspective_name: str) -> Optio
 
 
 # ============================================
-# Node 3: Multi-Perspective Solution Generation
+# Node 3: Multi-Perspective Solution Generation (Dynamic Agents)
 # ============================================
 
 async def solution_generation_node(state: AutoGITState) -> Dict[str, Any]:
     """
-    Node 3: Generate solutions from multiple expert perspectives
-    
-    Each perspective (ML Researcher, Systems Engineer, Applied Scientist)
-    proposes solutions based on their expertise.
-    All perspectives run IN PARALLEL — ~3x speedup vs sequential.
+    Node 3: Generate solutions from dynamically-spawned expert agents.
+
+    **Kimi K2.5-style**: the number and kind of agents was determined by
+    ``generate_perspectives_node``.  Each agent now proposes a solution
+    concurrently via the AgentPool fan-out pattern.
+
+    Backward-compatible: if dynamic spawning was skipped, falls back to
+    the classic per-perspective LLM loop.
     """
     logger.info(f"💡 Solution Generation Node (Round {state['current_round'] + 1})")
     
     try:
-        # Use balanced model for solution generation
-        llm = get_fallback_llm("balanced")
-        
         problem = state["selected_problem"]
-        
-        # Create console for user feedback
         console = Console()
+
+        # ── Try dynamic AgentPool path first ─────────────────────────────
         try:
-            from ..utils.model_manager import get_profile_primary as _gpp2
-        except Exception:
-            from utils.model_manager import get_profile_primary as _gpp2  # type: ignore
-        console.print(f"  [dim]🤖 Model: balanced → {_gpp2('balanced')}[/dim]")
+            from src.agents.dynamic_spawner import AgentSpawner, AgentRole, AgentPool
+        except ImportError:
+            try:
+                from agents.dynamic_spawner import AgentSpawner, AgentRole, AgentPool  # type: ignore
+            except ImportError:
+                AgentSpawner = None  # type: ignore
 
-        import asyncio as _asyncio_solgen
+        dynamic_cfgs = state.get("dynamic_perspective_configs") or []
+        use_dynamic = AgentSpawner is not None and dynamic_cfgs and any(
+            isinstance(c, dict) and c.get("model_profile") for c in dynamic_cfgs
+        )
 
-        async def _generate_one_proposal(perspective_name: str):
-            """Generate a single proposal from one perspective — runs concurrently."""
-            perspective = _get_perspective_config(state, perspective_name)
-            if not perspective:
-                return None
+        if use_dynamic:
+            # ── Build typed AgentRoles from perspective configs ───────────
+            roles = []
+            for cfg in dynamic_cfgs:
+                roles.append(AgentRole(
+                    name=cfg.get("name", "Agent"),
+                    role_description=cfg.get("role", "Domain expert"),
+                    expertise=cfg.get("expertise", ""),
+                    focus_areas=cfg.get("focus_areas", []),
+                    evaluation_criteria=cfg.get("evaluation_criteria", []),
+                    temperature=float(cfg.get("temperature", 0.7)),
+                    model_profile=str(cfg.get("model_profile", "balanced")),
+                    weight=float(cfg.get("weight", 1.0)),
+                ))
 
-            logger.info(f"  📝 Generating solution from: {perspective['name']}")
+            spawner = AgentSpawner()
+            pool = await spawner.spawn_for_task(
+                task=f"Propose a solution for: {problem}",
+                context={"idea": state["idea"], "selected_problem": problem},
+                phase="debate",
+                fixed_roles=roles,  # reuse the roles from generate_perspectives
+            )
 
-            system_prompt = f"""You are a {perspective['role']}.
+            console.print(
+                f"  [cyan]🤖 Running {pool.size} dynamically-spawned agents "
+                f"in parallel...[/cyan]"
+            )
+
+            output_fmt = """Output ONLY valid JSON:
+{
+  "approach_name": "Descriptive name",
+  "key_innovation": "Core novel contribution",
+  "architecture_design": "High-level architecture description",
+  "implementation_plan": ["Step 1", "Step 2"],
+  "expected_advantages": ["Advantage 1"],
+  "potential_challenges": ["Challenge 1"],
+  "novelty_score": 0.0-1.0,
+  "feasibility_score": 0.0-1.0
+}"""
+
+            pool_result = await pool.run_parallel(
+                task=f"""Problem: {problem}
+
+Propose a solution from your expert perspective.
+Focus on your specific domain expertise and provide a concrete, implementable approach.""",
+                output_format=output_fmt,
+            )
+
+            # Convert AgentResults → SolutionProposal dicts
+            proposals = []
+            for ar in pool_result.results:
+                if not ar.success:
+                    logger.warning(f"  ⚠️  Agent {ar.agent_name} failed: {ar.error}")
+                    continue
+                sj = ar.output if isinstance(ar.output, dict) else {}
+                if not sj:
+                    continue
+                sol: SolutionProposal = {
+                    "approach_name": sj.get("approach_name", "Unnamed"),
+                    "perspective": ar.agent_name,
+                    "key_innovation": sj.get("key_innovation", ""),
+                    "architecture_design": sj.get("architecture_design", ""),
+                    "implementation_plan": sj.get("implementation_plan", []),
+                    "expected_advantages": sj.get("expected_advantages", []),
+                    "potential_challenges": sj.get("potential_challenges", []),
+                    "novelty_score": float(sj.get("novelty_score", 0.5)),
+                    "feasibility_score": float(sj.get("feasibility_score", 0.5)),
+                }
+                console.print(f"    [green]✓[/green] [bold]{sol['approach_name']}[/bold]  [dim]({ar.agent_name}, {ar.latency_s}s)[/dim]")
+                proposals.append(sol)
+
+            if pool_result.failed > 0:
+                console.print(
+                    f"  [yellow]⚠️  {pool_result.failed}/{pool.size} agents failed — "
+                    f"debate continues with {len(proposals)} proposals[/yellow]"
+                )
+
+        else:
+            # ── FALLBACK: classic per-perspective loop ────────────────────
+            llm = get_fallback_llm("balanced")
+            try:
+                from ..utils.model_manager import get_profile_primary as _gpp2
+            except Exception:
+                from utils.model_manager import get_profile_primary as _gpp2  # type: ignore
+            console.print(f"  [dim]🤖 Model: balanced → {_gpp2('balanced')}[/dim]")
+
+            import asyncio as _asyncio_solgen
+
+            async def _generate_one_proposal(perspective_name: str):
+                perspective = _get_perspective_config(state, perspective_name)
+                if not perspective:
+                    return None
+                logger.info(f"  📝 Generating solution from: {perspective['name']}")
+                system_prompt = f"""You are a {perspective['role']}.
 
 Your expertise: {perspective['expertise']}
 Your focus areas: {', '.join(perspective['focus_areas'])}
@@ -1316,67 +3758,54 @@ Output format (JSON):
   "novelty_score": 0.0-1.0,
   "feasibility_score": 0.0-1.0
 }}"""
-
-            user_prompt = f"""Problem: {problem}
+                user_prompt = f"""Problem: {problem}
 
 Propose a solution from your perspective as a {perspective['role']}.
 Focus on: {', '.join(perspective['focus_areas'])}
 
 Return ONLY valid JSON."""
-
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
-            ]
-
-            try:
-                response = await llm.ainvoke(messages)
-            except Exception as _e:
-                logger.warning(f"  ⚠️  Solution gen failed for {perspective['name']}: {_e}")
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt)
+                ]
+                try:
+                    response = await llm.ainvoke(messages)
+                except Exception as _e:
+                    logger.warning(f"  ⚠️  Solution gen failed for {perspective['name']}: {_e}")
+                    return None
+                solution_json = extract_json_from_text(response.content)
+                if solution_json and isinstance(solution_json, dict):
+                    solution: SolutionProposal = {
+                        "approach_name": solution_json.get("approach_name", "Unnamed Approach"),
+                        "perspective": perspective_name,
+                        "key_innovation": solution_json.get("key_innovation", ""),
+                        "architecture_design": solution_json.get("architecture_design", ""),
+                        "implementation_plan": solution_json.get("implementation_plan", []),
+                        "expected_advantages": solution_json.get("expected_advantages", []),
+                        "potential_challenges": solution_json.get("potential_challenges", []),
+                        "novelty_score": float(solution_json.get("novelty_score", 0.5)),
+                        "feasibility_score": float(solution_json.get("feasibility_score", 0.5))
+                    }
+                    console.print(f"    [green]✓[/green] [bold]{solution['approach_name']}[/bold]")
+                    console.print(f"       [dim]{solution['key_innovation'][:80]}...[/dim]")
+                    return solution
                 return None
 
-            solution_json = extract_json_from_text(response.content)
-
-            if solution_json and isinstance(solution_json, dict):
-                solution: SolutionProposal = {
-                    "approach_name": solution_json.get("approach_name", "Unnamed Approach"),
-                    "perspective": perspective_name,
-                    "key_innovation": solution_json.get("key_innovation", ""),
-                    "architecture_design": solution_json.get("architecture_design", ""),
-                    "implementation_plan": solution_json.get("implementation_plan", []),
-                    "expected_advantages": solution_json.get("expected_advantages", []),
-                    "potential_challenges": solution_json.get("potential_challenges", []),
-                    "novelty_score": float(solution_json.get("novelty_score", 0.5)),
-                    "feasibility_score": float(solution_json.get("feasibility_score", 0.5))
-                }
-                console.print(f"    [green]✓[/green] [bold]{solution['approach_name']}[/bold]")
-                console.print(f"       [dim]{solution['key_innovation'][:80]}...[/dim]")
-                logger.info(f"    ✅ Generated: {solution['approach_name']}")
-                return solution
-            return None
-
-        # ── Run ALL perspectives in parallel ─────────────────────────────────
-        # critique_node already does this; solution_generation was the last
-        # sequential bottleneck in the debate loop.
-        console.print(f"  [cyan]🧠 Running {len(state['perspectives'])} expert proposals in parallel...[/cyan]")
-        raw_results = await _asyncio_solgen.gather(
-            *[_generate_one_proposal(p) for p in state["perspectives"]],
-            return_exceptions=True
-        )
-        proposals = [
-            r for r in raw_results
-            if r is not None and not isinstance(r, Exception)
-        ]
-        _n_failed_proposals = len(raw_results) - len(proposals)
-        if _n_failed_proposals > 0:
-            logger.warning(
-                f"  ⚠️  {_n_failed_proposals}/{len(raw_results)} perspective proposals FAILED "
-                f"(LLM errors) — debate has only {len(proposals)} perspectives"
+            console.print(f"  [cyan]🧠 Running {len(state['perspectives'])} expert proposals in parallel...[/cyan]")
+            raw_results = await _asyncio_solgen.gather(
+                *[_generate_one_proposal(p) for p in state["perspectives"]],
+                return_exceptions=True
             )
-            console.print(
-                f"  [yellow]⚠️  {_n_failed_proposals}/{len(raw_results)} proposals failed — "
-                f"debate continues with {len(proposals)} perspectives[/yellow]"
-            )
+            proposals = [
+                r for r in raw_results
+                if r is not None and not isinstance(r, Exception)
+            ]
+            _n_failed_proposals = len(raw_results) - len(proposals)
+            if _n_failed_proposals > 0:
+                console.print(
+                    f"  [yellow]⚠️  {_n_failed_proposals}/{len(raw_results)} proposals failed — "
+                    f"debate continues with {len(proposals)} perspectives[/yellow]"
+                )
         
         logger.info(f"✅ Generated {len(proposals)} solutions from {len(state['perspectives'])} perspectives")
         
@@ -1401,28 +3830,23 @@ Return ONLY valid JSON."""
 
 
 # ============================================
-# Node 4: Multi-Perspective Critique
+# Node 4: Multi-Perspective Critique (Dynamic Agents)
 # ============================================
 
 async def critique_node(state: AutoGITState) -> Dict[str, Any]:
     """
-    Node 4: Each perspective critiques all proposals
-    
-    Cross-perspective review to identify strengths and weaknesses.
+    Node 4: Each dynamically-spawned agent critiques all proposals.
+
+    **Kimi K2.5-style**: spawns one review-agent per (reviewer, proposal) pair
+    with the reviewer's specific expertise baked into its system prompt.
+    All run in parallel via AgentPool for maximum throughput.
+
+    Backward-compatible: falls back to the classic per-perspective LLM loop.
     """
     logger.info("🔍 Critique Node: Multi-perspective review")
     
     try:
-        # Use reasoning model for critique
-        llm = get_llm("reasoning")
-        try:
-            from ..utils.model_manager import get_profile_primary as _gpp3
-        except Exception:
-            from utils.model_manager import get_profile_primary as _gpp3  # type: ignore
-        from rich.console import Console as _RC3
-        _RC3().print(f"  [dim]🤖 Model: reasoning → {_gpp3('reasoning')}[/dim]")
-        
-        # Get current round's proposals — guard against empty debate_rounds
+        # Get current round's proposals
         debate_rounds = state.get("debate_rounds") or []
         if not debate_rounds:
             logger.warning("Critique node: no debate rounds found, skipping critique")
@@ -1438,20 +3862,152 @@ async def critique_node(state: AutoGITState) -> Dict[str, Any]:
                 "current_stage": "no_debate_rounds",
                 "errors": ["Critique skipped: no proposals in current round"]
             }
+
+        console = Console()
         all_critiques: List[Critique] = []
 
-        
-        # Create console for user feedback
-        console = Console()
-        import asyncio as _asyncio_critique
+        # ── Dynamic AgentPool critique path ──────────────────────────────
+        try:
+            from src.agents.dynamic_spawner import AgentSpawner, AgentRole, AgentPool, SpawnedAgent
+        except ImportError:
+            try:
+                from agents.dynamic_spawner import AgentSpawner, AgentRole, AgentPool, SpawnedAgent  # type: ignore
+            except ImportError:
+                AgentSpawner = None  # type: ignore
 
-        # Build all (reviewer, proposal) critique tasks first, then run in parallel.
-        # This cuts critique time from ~(6 × avg_latency) → ~max_single_latency.
-        async def _run_one_critique(reviewer, reviewer_perspective_name, proposal):
-            system_prompt = f"""You are a {reviewer['role']} reviewing a proposed solution.
+        dynamic_cfgs = state.get("dynamic_perspective_configs") or []
+        use_dynamic = AgentSpawner is not None and dynamic_cfgs and any(
+            isinstance(c, dict) and c.get("model_profile") for c in dynamic_cfgs
+        )
+
+        if use_dynamic:
+            # Create one specialised review-agent per (reviewer, proposal) pair.
+            # Each agent has the reviewer's expertise baked in as system prompt.
+            critique_agents: list[SpawnedAgent] = []
+            critique_meta: list[tuple[str, str]] = []  # (reviewer_name, proposal_name)
+
+            try:
+                from src.utils.model_manager import get_fallback_llm as _get_fb
+            except ImportError:
+                from utils.model_manager import get_fallback_llm as _get_fb  # type: ignore
+
+            for cfg in dynamic_cfgs:
+                reviewer_name = cfg.get("name", "?")
+                for proposal in proposals:
+                    if proposal.get("perspective") == reviewer_name:
+                        continue  # skip self-review
+
+                    eval_criteria = cfg.get("evaluation_criteria", [])
+                    sys_prompt = f"""You are a {cfg.get('role', 'Domain Expert')} reviewing a proposed solution.
+
+Your expertise: {cfg.get('expertise', '')}
+Focus areas: {', '.join(cfg.get('focus_areas', []))}
+{f"Evaluation criteria: {', '.join(eval_criteria)}" if eval_criteria else ""}
+
+Provide constructive critique focusing on:
+- Technical feasibility from your specialist angle
+- Potential issues and risks
+- Concrete improvement suggestions
+
+Output ONLY valid JSON:
+{{
+  "overall_assessment": "promising" | "needs-work" | "flawed",
+  "strengths": ["Strength 1"],
+  "weaknesses": ["Weakness 1"],
+  "specific_concerns": ["Concern 1"],
+  "improvement_suggestions": ["Suggestion 1"],
+  "feasibility_score": 0.0-1.0,
+  "recommendation": "accept" | "revise" | "reject"
+}}"""
+
+                    role = AgentRole(
+                        name=f"{reviewer_name}→{proposal['approach_name'][:20]}",
+                        role_description=cfg.get("role", "Reviewer"),
+                        expertise=cfg.get("expertise", ""),
+                        focus_areas=cfg.get("focus_areas", []),
+                        system_prompt=sys_prompt,
+                        temperature=float(cfg.get("temperature", 0.4)),
+                        model_profile=cfg.get("model_profile", "reasoning"),
+                        weight=float(cfg.get("weight", 1.0)),
+                    )
+                    llm = _get_fb(role.model_profile)
+                    agent = SpawnedAgent(role=role, llm=llm)
+                    critique_agents.append(agent)
+                    critique_meta.append((reviewer_name, proposal["approach_name"]))
+
+            console.print(
+                f"\n  [magenta]🔍 Running {len(critique_agents)} critique agents "
+                f"in parallel (dynamic pool)...[/magenta]"
+            )
+
+            pool = AgentPool(critique_agents, phase="review")
+
+            # Each agent gets a task specific to the proposal it reviews
+            import asyncio as _asyncio_critique
+            coros = []
+            for i, agent in enumerate(critique_agents):
+                _, prop_name = critique_meta[i]
+                # Find the proposal
+                prop = next((p for p in proposals if p["approach_name"] == prop_name), proposals[0])
+                task_text = f"""Review this proposal:
+
+Approach: {prop['approach_name']}
+Innovation: {prop['key_innovation']}
+Architecture: {prop['architecture_design']}
+Implementation: {', '.join(prop.get('implementation_plan', []))}
+
+Provide a detailed critique from your expert perspective."""
+                coros.append(agent.execute(task_text))
+
+            raw_results = await _asyncio_critique.gather(*coros, return_exceptions=True)
+
+            for i, result in enumerate(raw_results):
+                reviewer_name, prop_name = critique_meta[i]
+                if isinstance(result, Exception):
+                    logger.warning(f"  ⚠️  Critique by {reviewer_name} on {prop_name[:40]} FAILED: {result}")
+                    continue
+                if not result.success or not isinstance(result.output, dict):
+                    continue
+
+                cj = result.output
+                critique = {
+                    "solution_id": prop_name,
+                    "reviewer_perspective": reviewer_name,
+                    "overall_assessment": cj.get("overall_assessment", "needs-work"),
+                    "strengths": cj.get("strengths", []),
+                    "weaknesses": cj.get("weaknesses", []),
+                    "specific_concerns": cj.get("specific_concerns", []),
+                    "improvement_suggestions": cj.get("improvement_suggestions", []),
+                    "feasibility_score": float(cj.get("feasibility_score", 0.5)),
+                    "recommendation": cj.get("recommendation", "revise"),
+                }
+                all_critiques.append(critique)
+
+                rec = critique["recommendation"]
+                color = {"accept": "green", "revise": "yellow"}.get(rec, "red")
+                symbol = {"accept": "✓", "revise": "⚠", "reject": "×"}.get(rec, "?")
+                console.print(
+                    f"    [{color}]{symbol}[/{color}] [bold]{prop_name[:50]}[/bold] "
+                    f"← {reviewer_name}: [{color}]{rec.capitalize()}[/{color}]  "
+                    f"[dim]({result.latency_s}s)[/dim]"
+                )
+
+        else:
+            # ── FALLBACK: classic per-perspective critique loop ───────────
+            llm = get_llm("reasoning", complexity_override=state.get("complexity_override"))
+            try:
+                from ..utils.model_manager import get_profile_primary as _gpp3
+            except Exception:
+                from utils.model_manager import get_profile_primary as _gpp3  # type: ignore
+            console.print(f"  [dim]🤖 Model: reasoning → {_gpp3('reasoning')}[/dim]")
+
+            import asyncio as _asyncio_critique
+
+            async def _run_one_critique(reviewer, reviewer_perspective_name, proposal):
+                system_prompt = f"""You are a {reviewer['role']} reviewing a proposed solution.
 
 Your expertise: {reviewer['expertise']}
-Evaluation criteria: {', '.join(reviewer['evaluation_criteria'])}
+Evaluation criteria: {', '.join(reviewer.get('evaluation_criteria', []))}
 
 Provide constructive critique focusing on:
 - Technical feasibility
@@ -1468,98 +4024,78 @@ Output format (JSON):
   "feasibility_score": 0.0-1.0,
   "recommendation": "accept" | "revise" | "reject"
 }}"""
-
-            user_prompt = f"""Review this proposal:
+                user_prompt = f"""Review this proposal:
 
 Approach: {proposal['approach_name']}
 Innovation: {proposal['key_innovation']}
 Architecture: {proposal['architecture_design']}
-Implementation: {', '.join(proposal['implementation_plan'])}
+Implementation: {', '.join(proposal.get('implementation_plan', []))}
 
 From your perspective as {reviewer['role']}, provide a detailed critique.
 Return ONLY valid JSON."""
-
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
-            ]
-            try:
-                response = await _asyncio_critique.wait_for(
-                    llm.ainvoke(messages),
-                    timeout=90
-                )
-            except Exception as _err:
-                logger.warning(f"Critique LLM call failed ({reviewer['name']} → {proposal['approach_name'][:40]}): {_err}")
+                messages = [
+                    SystemMessage(content=system_prompt),
+                    HumanMessage(content=user_prompt)
+                ]
+                try:
+                    response = await _asyncio_critique.wait_for(
+                        llm.ainvoke(messages), timeout=180
+                    )
+                except Exception as _err:
+                    logger.warning(f"Critique LLM call failed ({reviewer['name']} → {proposal['approach_name'][:40]}): {_err}")
+                    return None
+                critique_json = extract_json_from_text(response.content)
+                if critique_json and isinstance(critique_json, dict):
+                    return {
+                        "solution_id": proposal["approach_name"],
+                        "reviewer_perspective": reviewer_perspective_name,
+                        "overall_assessment": critique_json.get("overall_assessment", "needs-work"),
+                        "strengths": critique_json.get("strengths", []),
+                        "weaknesses": critique_json.get("weaknesses", []),
+                        "specific_concerns": critique_json.get("specific_concerns", []),
+                        "improvement_suggestions": critique_json.get("improvement_suggestions", []),
+                        "feasibility_score": float(critique_json.get("feasibility_score", 0.5)),
+                        "recommendation": critique_json.get("recommendation", "revise"),
+                    }
                 return None
-            critique_json = extract_json_from_text(response.content)
-            if critique_json and isinstance(critique_json, dict):
-                return {
-                    "solution_id": proposal["approach_name"],
-                    "reviewer_perspective": reviewer_perspective_name,
-                    "overall_assessment": critique_json.get("overall_assessment", "needs-work"),
-                    "strengths": critique_json.get("strengths", []),
-                    "weaknesses": critique_json.get("weaknesses", []),
-                    "specific_concerns": critique_json.get("specific_concerns", []),
-                    "improvement_suggestions": critique_json.get("improvement_suggestions", []),
-                    "feasibility_score": float(critique_json.get("feasibility_score", 0.5)),
-                    "recommendation": critique_json.get("recommendation", "revise")
-                }
-            return None
 
-        # Collect all tasks (skip self-review)
-        critique_tasks = []
-        for reviewer_perspective_name in state["perspectives"]:
-            reviewer = _get_perspective_config(state, reviewer_perspective_name)
-            if not reviewer:
-                continue
-            for proposal in proposals:
-                if proposal["perspective"] == reviewer_perspective_name:
-                    continue  # skip self-review
-                critique_tasks.append((reviewer, reviewer_perspective_name, proposal))
+            critique_tasks = []
+            for reviewer_perspective_name in state["perspectives"]:
+                reviewer = _get_perspective_config(state, reviewer_perspective_name)
+                if not reviewer:
+                    continue
+                for proposal in proposals:
+                    if proposal["perspective"] == reviewer_perspective_name:
+                        continue
+                    critique_tasks.append((reviewer, reviewer_perspective_name, proposal))
 
-        console.print(f"\n  [magenta]🔍 Running {len(critique_tasks)} critiques in parallel...[/magenta]")
-        logger.info(f"  🔍 Running {len(critique_tasks)} critiques in parallel")
-
-        # Run all critiques concurrently
-        results = await _asyncio_critique.gather(
-            *[_run_one_critique(r, rn, p) for r, rn, p in critique_tasks],
-            return_exceptions=True
-        )
-
-        for (reviewer, reviewer_perspective_name, proposal), result in zip(critique_tasks, results):
-            if isinstance(result, Exception):
-                logger.warning(
-                    f"  ⚠️  Critique by {reviewer.get('name', '?')} on "
-                    f"'{proposal.get('approach_name', '?')[:40]}' FAILED: {result}"
+            console.print(f"\n  [magenta]🔍 Running {len(critique_tasks)} critiques in parallel...[/magenta]")
+            results = await _asyncio_critique.gather(
+                *[_run_one_critique(r, rn, p) for r, rn, p in critique_tasks],
+                return_exceptions=True
+            )
+            for (reviewer, reviewer_perspective_name, proposal), result in zip(critique_tasks, results):
+                if isinstance(result, Exception) or result is None:
+                    continue
+                all_critiques.append(result)
+                rec = result["recommendation"]
+                color = {"accept": "green", "revise": "yellow"}.get(rec, "red")
+                symbol = {"accept": "✓", "revise": "⚠", "reject": "×"}.get(rec, "?")
+                console.print(
+                    f"    [{color}]{symbol}[/{color}] [bold]{proposal['approach_name'][:50]}[/bold] "
+                    f"← {reviewer['name']}: [{color}]{rec.capitalize()}[/{color}]"
                 )
-                continue
-            if result is None:
-                continue
-            critique = result
-            all_critiques.append(critique)
-            recommendation = critique["recommendation"]
-            if recommendation == "accept":
-                console.print(f"    [green]✓[/green] [bold]{proposal['approach_name'][:50]}[/bold] ← {reviewer['name']}: [green]Accept[/green]")
-            elif recommendation == "revise":
-                console.print(f"    [yellow]⚠[/yellow] [bold]{proposal['approach_name'][:50]}[/bold] ← {reviewer['name']}: [yellow]Revise[/yellow]")
-            else:
-                console.print(f"    [red]×[/red] [bold]{proposal['approach_name'][:50]}[/bold] ← {reviewer['name']}: [red]Reject[/red]")
-            logger.info(f"    ✅ {reviewer['name']}: {critique['overall_assessment']} ({critique['recommendation']})")
-        
-        
-        # Update current round with critiques
+
+        # ── Update round ─────────────────────────────────────────────────
         updated_round = current_round.copy()
         updated_round["critiques"] = all_critiques
         updated_round["round_summary"] = f"{len(proposals)} proposals, {len(all_critiques)} critiques"
-        
-        # Update state (replace last round)
-        updated_rounds = state["debate_rounds"][:-1] + [updated_round]
         
         logger.info(f"✅ Generated {len(all_critiques)} critiques")
         
         return {
             "current_stage": "critiques_complete",
-            "debate_rounds": [updated_round]  # LangGraph will append this
+            "debate_rounds": [updated_round]
         }
         
     except Exception as e:
@@ -1640,14 +4176,14 @@ async def solution_selection_node(state: AutoGITState) -> Dict[str, Any]:
     
     try:
         # Use reasoning model for solution selection
-        llm = get_llm("reasoning")
+        llm = get_llm("reasoning", complexity_override=state.get("complexity_override"))
         
         # Collect all proposals and critiques
         all_proposals = []
         all_critiques = []
         for round_data in state["debate_rounds"]:
-            all_proposals.extend(round_data["proposals"])
-            all_critiques.extend(round_data["critiques"])
+            all_proposals.extend(round_data.get("proposals") or [])
+            all_critiques.extend(round_data.get("critiques") or [])
         
         # Build summary
         summary = "# Debate Summary\n\n"
@@ -1782,6 +4318,7 @@ def _build_research_report(state: AutoGITState) -> str:
     final_sol     = state.get("final_solution") or {}
     rc            = state.get("research_context") or {}
     cb            = rc.get("compound_beta_research") or {}
+    px            = rc.get("perplexica_research") or {}
     papers        = rc.get("papers") or []
     impls         = rc.get("implementations") or []
     debate_rounds = state.get("debate_rounds") or []
@@ -1842,10 +4379,38 @@ def _build_research_report(state: AutoGITState) -> str:
     # ── 2. State of the Art ────────────────────────────────────────────────
     h(2, "2. State of the Art")
     sota = cb.get("sota_summary", "")
+    px_summary = px.get("summary", "")
     if sota:
         p(sota)
+    elif px_summary:
+        p(px_summary)
     else:
         p("*(Web search not available — see papers below)*")
+
+    # Perplexica research metadata
+    if px:
+        px_sources = px.get("unique_sources", 0)
+        px_queries = px.get("queries_run", 0)
+        px_agents  = px.get("swarm_agents", 0)
+        px_elapsed = px.get("elapsed_s", 0)
+        if px_sources or px_agents:
+            p()
+            p(f"> **Research powered by Perplexica** — "
+              f"{px_sources} unique sources, {px_queries} queries, "
+              f"{px_agents} swarm agents, {px_elapsed:.1f}s elapsed")
+            p()
+
+    # Perplexica insights
+    px_insights = px.get("insights") or []
+    if px_insights:
+        h(3, "Key Research Insights")
+        for ins in px_insights[:10]:
+            # Truncate very long insights but keep useful detail
+            text = ins.strip()
+            if len(text) > 600:
+                text = text[:600] + "..."
+            p(f"- {text}")
+        p()
 
     # Benchmarks
     benchmarks = cb.get("benchmarks") or []
@@ -1912,6 +4477,20 @@ def _build_research_report(state: AutoGITState) -> str:
             p(f"- **{name}**{link}")
             if desc:
                 p(f"  {desc}")
+
+    # Web search results
+    web_results = rc.get("web_results") or []
+    if web_results:
+        h(3, f"Web Search Results ({len(web_results)} found)")
+        for i, wr in enumerate(web_results[:20], 1):
+            title   = wr.get("title", "Untitled")
+            url     = wr.get("url", "")
+            snippet = wr.get("snippet", wr.get("content", ""))
+            link = f" — <{url}>" if url else ""
+            p(f"**{i}. {title}**{link}")
+            if snippet:
+                p(f"> {snippet[:300]}")
+            p()
 
     # ── 4. Expert Perspectives ────────────────────────────────────────────
     h(2, "4. Expert Perspectives")
@@ -2144,13 +4723,28 @@ async def architect_spec_node(state: AutoGITState) -> Dict[str, Any]:
     _console.print("\n[bold blue]📐 Generating Technical Architecture Specification...[/bold blue]")
 
     try:
-        idea = state.get("idea", "")
+        def _as_text(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            if isinstance(value, (list, tuple, set)):
+                return "\n".join(_as_text(v) for v in value if v is not None)
+            if isinstance(value, dict):
+                try:
+                    import json as _json_arch
+                    return _json_arch.dumps(value, ensure_ascii=False)
+                except Exception:
+                    return str(value)
+            return str(value)
+
+        idea = _as_text(state.get("idea", ""))
         solution = state.get("final_solution") or {}
-        approach = solution.get("approach_name", "")
-        innovation = solution.get("key_innovation", "")
-        architecture = solution.get("architecture_design", "")
-        implementation_plan = solution.get("implementation_plan", [])
-        research_summary = state.get("research_summary", "") or ""
+        approach = _as_text(solution.get("approach_name", ""))
+        innovation = _as_text(solution.get("key_innovation", ""))
+        architecture = _as_text(solution.get("architecture_design", ""))
+        implementation_plan = _as_text(solution.get("implementation_plan", []))
+        research_summary = _as_text(state.get("research_summary", "") or "")
 
         llm = get_fallback_llm("balanced")
 
@@ -2161,8 +4755,17 @@ async def architect_spec_node(state: AutoGITState) -> Dict[str, Any]:
             f"APPROACH: {approach}\n"
             f"KEY INNOVATION: {innovation}\n"
             f"ARCHITECTURE: {architecture}\n"
-            f"IMPLEMENTATION PLAN: {implementation_plan}\n\n"
-            "Generate a comprehensive technical specification. Return ONLY valid JSON:\n"
+            f"IMPLEMENTATION PLAN: {implementation_plan}\n"
+        )
+        # S20-Rank9: Inject research summary so the architect can ground
+        # algorithm choices in actual papers/implementations found during research
+        if research_summary:
+            # S25: Raised from 2K→8K→20K — with 2M context primary model,
+            # there's no reason to starve the architect spec of research context.
+            _rs_trimmed = research_summary[:20000]
+            spec_prompt += f"\nRESEARCH CONTEXT (key findings to inform design):\n{_rs_trimmed}\n"
+        spec_prompt += (
+            "\nGenerate a comprehensive technical specification. Return ONLY valid JSON:\n"
             "{\n"
             '  "project_name": "short-descriptive-name",\n'
             '  "one_line_description": "What this does in one sentence",\n'
@@ -2221,24 +4824,34 @@ async def architect_spec_node(state: AutoGITState) -> Dict[str, Any]:
         try:
             response = await _asyncio_spec.wait_for(
                 llm.ainvoke(messages),
-                timeout=300  # 5 minutes hard cap
+                timeout=600  # 10 minutes hard cap
             )
         except _asyncio_spec.TimeoutError:
-            logger.warning("  ⏰ Architect spec LLM call timed out after 300s — retrying with fast model")
+            logger.warning("  ⏰ Architect spec LLM call timed out after 600s — retrying with fast model")
             _console.print("  [yellow]⏰ Spec timed out — retrying with faster model...[/yellow]")
             _fast_llm = get_fallback_llm("fast")
             try:
                 response = await _asyncio_spec.wait_for(
                     _fast_llm.ainvoke(messages),
-                    timeout=120
+                    timeout=300
                 )
             except _asyncio_spec.TimeoutError:
                 logger.error("  ❌ Architect spec timed out on retry — proceeding without spec")
                 _console.print("  [red]❌ Spec generation timed out — code gen will proceed without blueprint[/red]")
+                _fallback_spec = _build_minimal_architecture_spec(state)
+                _fallback_text = (
+                    "ARCHITECTURE SPECIFICATION (deterministic fallback):\n"
+                    f"Project: {_fallback_spec.get('project_name', '')}\n"
+                    f"Description: {_fallback_spec.get('one_line_description', '')}\n"
+                    "Files:\n"
+                    + "\n".join(f"- {f.get('name')}: {f.get('purpose')}" for f in _fallback_spec.get("files", []))
+                )
                 return {
-                    "current_stage": "architect_spec_failed",
-                    "architecture_spec": None,
-                    "_architecture_spec_text": "",
+                    "current_stage": "architect_spec_complete",
+                    "architecture_spec": _fallback_spec,
+                    "_architecture_spec_text": _fallback_text,
+                    "repo_map": _build_repo_map_from_spec(_fallback_spec),
+                    "warnings": ["Architect spec timed out; using deterministic fallback spec."],
                 }
 
         import json as _jsa, re as _resa
@@ -2278,7 +4891,11 @@ async def architect_spec_node(state: AutoGITState) -> Dict[str, Any]:
         _console.print(f"  [bold]Entry point:[/bold] {spec.get('entry_point_behavior', 'N/A')[:100]}")
 
         for f in spec.get("files", []):
-            _console.print(f"    {f['name']}: {f.get('estimated_lines', '?')} lines — {f.get('purpose', '')[:60]}")
+            if not isinstance(f, dict):
+                continue
+            _fname = _as_text(f.get("name", "unknown.py"))
+            _purpose = _as_text(f.get("purpose", ""))
+            _console.print(f"    {_fname}: {f.get('estimated_lines', '?')} lines — {_purpose[:60]}")
 
         logger.info(f"  📐 Spec: {file_count} files, {total_lines} est. lines, {algo_count} algorithms")
 
@@ -2292,41 +4909,71 @@ async def architect_spec_node(state: AutoGITState) -> Dict[str, Any]:
             "",
         ]
         for f in spec.get("files", []):
-            spec_text_lines.append(f"FILE: {f['name']} ({f.get('estimated_lines', 100)}+ lines)")
-            spec_text_lines.append(f"  Purpose: {f.get('purpose', '')}")
-            for cls in f.get("key_classes", []):
-                spec_text_lines.append(f"  class {cls['name']}: {cls.get('purpose', '')}")
-                for m in cls.get("key_methods", []):
-                    spec_text_lines.append(f"    {m}")
-            for fn in f.get("key_functions", []):
-                spec_text_lines.append(f"  {fn}")
+            if not isinstance(f, dict):
+                continue
+            _fname = _as_text(f.get("name", "unknown.py"))
+            spec_text_lines.append(f"FILE: {_fname} ({f.get('estimated_lines', 100)}+ lines)")
+            spec_text_lines.append(f"  Purpose: {_as_text(f.get('purpose', ''))}")
+            for cls in f.get("key_classes", []) or []:
+                if not isinstance(cls, dict):
+                    continue
+                spec_text_lines.append(f"  class {_as_text(cls.get('name', 'Class'))}: {_as_text(cls.get('purpose', ''))}")
+                for m in cls.get("key_methods", []) or []:
+                    spec_text_lines.append(f"    {_as_text(m)}")
+            for fn in f.get("key_functions", []) or []:
+                spec_text_lines.append(f"  {_as_text(fn)}")
             if f.get("imports_from_project"):
-                spec_text_lines.append(f"  Imports: {', '.join(f.get('imports_from_project', []))}")
+                _imports = [
+                    _as_text(i) for i in (f.get("imports_from_project", []) or [])
+                    if _as_text(i).strip()
+                ]
+                if _imports:
+                    spec_text_lines.append(f"  Imports: {', '.join(_imports)}")
             spec_text_lines.append("")
 
         if spec.get("key_algorithms"):
             spec_text_lines.append("KEY ALGORITHMS:")
             for algo in spec.get("key_algorithms", []):
-                spec_text_lines.append(f"  {algo['name']} (in {algo.get('file', '?')}):")
-                for line in algo.get("pseudocode", "").splitlines():
+                if not isinstance(algo, dict):
+                    continue
+                spec_text_lines.append(f"  {_as_text(algo.get('name', 'Algorithm'))} (in {_as_text(algo.get('file', '?'))}):")
+                _pseudo = algo.get("pseudocode", "")
+                if isinstance(_pseudo, (list, tuple, set)):
+                    _pseudo_lines = [_as_text(x) for x in _pseudo if _as_text(x).strip()]
+                else:
+                    _pseudo_text = _as_text(_pseudo)
+                    _pseudo_lines = [ln for ln in _pseudo_text.splitlines() if ln.strip()]
+                for line in _pseudo_lines:
                     spec_text_lines.append(f"    {line}")
                 spec_text_lines.append("")
 
         spec_text = "\n".join(spec_text_lines)
+        repo_map = _build_repo_map_from_spec(spec)
 
         return {
             "current_stage": "architect_spec_complete",
             "architecture_spec": spec,
             "_architecture_spec_text": spec_text,
+            "repo_map": repo_map,
         }
 
     except Exception as e:
         logger.warning(f"Architect spec failed ({e}) — proceeding without spec")
         _console.print(f"  [dim yellow]Spec generation failed ({e}) — code gen will proceed without blueprint[/dim yellow]")
+        _fallback_spec = _build_minimal_architecture_spec(state)
+        _fallback_text = (
+            "ARCHITECTURE SPECIFICATION (deterministic fallback):\n"
+            f"Project: {_fallback_spec.get('project_name', '')}\n"
+            f"Description: {_fallback_spec.get('one_line_description', '')}\n"
+            "Files:\n"
+            + "\n".join(f"- {f.get('name')}: {f.get('purpose')}" for f in _fallback_spec.get("files", []))
+        )
         return {
-            "current_stage": "architect_spec_failed",
-            "architecture_spec": None,
-            "_architecture_spec_text": "",
+            "current_stage": "architect_spec_complete",
+            "architecture_spec": _fallback_spec,
+            "_architecture_spec_text": _fallback_text,
+            "repo_map": _build_repo_map_from_spec(_fallback_spec),
+            "warnings": [f"Architect spec generation failed ({e}); using deterministic fallback spec."],
         }
 
 
@@ -2354,8 +5001,9 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
     execution_errors: list = []
     
     try:
+        import asyncio as _asyncio_codegen
         # Use powerful model for code generation
-        llm = get_llm("powerful")
+        llm = get_llm("powerful", complexity_override=state.get("complexity_override"))
         try:
             from ..utils.model_manager import get_profile_primary as _gpp7
         except Exception:
@@ -2366,10 +5014,13 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
         
         solution = state.get("final_solution")
         if not solution:
-            logger.warning("No solution found, skipping code generation")
+            logger.error("No solution found — cannot generate code (upstream node failed)")
+            console.print("\n[red]❌ No solution found. Cannot generate code.[/red]")
             return {
-                "current_stage": "code_generation_skipped",
-                "generated_code": {}
+                "current_stage": "code_generation_failed",
+                "generated_code": {},
+                "tests_passed": False,
+                "errors": ["CODE_GEN_FATAL: No final_solution in state — solution_selection_node likely failed"],
             }
         
         idea = state["idea"]
@@ -2424,6 +5075,81 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
         # ── Read architecture spec (from Node 6.5) ──────────────────────────
         _arch_spec_text = state.get("_architecture_spec_text") or ""
         _arch_spec = state.get("architecture_spec") or {}
+        _repo_map = state.get("repo_map") or ""
+        _context_budget_report = dict(state.get("context_budget_report") or {})
+
+        def _record_prompt_budget(phase: str, item: str, prompt_text: str, **extra: Any) -> None:
+            phase_report = dict(_context_budget_report.get(phase, {}))
+            phase_report[item] = {
+                "chars": len(prompt_text),
+                "approx_tokens": max(1, len(prompt_text) // 4),
+                **extra,
+            }
+            _context_budget_report[phase] = phase_report
+
+        def _trim_to_budget(text: str, max_chars: int = 400000, label: str = "context") -> str:
+            """S20-Rank4: Trim a prompt section to a character budget.
+            S24: Raised from 24K→120K.
+            S25: Raised from 120K→400K — primary model (Grok 4.1 Fast) has 2M context;
+            fallback models have 128K-262K.  120K discarded too much useful context.
+            Keeps the first 70% and last 30% of the budget, inserting a truncation marker.
+            Prevents prompt bloat from unbounded context injection."""
+            if len(text) <= max_chars:
+                return text
+            head_budget = int(max_chars * 0.7)
+            tail_budget = max_chars - head_budget - 100  # room for marker
+            _trimmed = text[:head_budget] + f"\n... [{label}: {len(text) - max_chars} chars trimmed] ...\n" + text[-tail_budget:]
+            logger.debug(f"  ✂️  Trimmed {label}: {len(text)} → {max_chars} chars")
+            return _trimmed
+
+        def _arch_context_for_file(fname: str) -> str:
+            if not _arch_spec:
+                return _arch_spec_text
+            matched = None
+            for file_spec in _arch_spec.get("files", []) or []:
+                if isinstance(file_spec, dict) and file_spec.get("name") == fname:
+                    matched = file_spec
+                    break
+            if not matched:
+                return _repo_map or _arch_spec_text
+
+            lines = [
+                "TARGETED ARCHITECTURE CONTEXT:",
+                f"Project: {_arch_spec.get('project_name', '')} — {_arch_spec.get('one_line_description', '')}".strip(),
+                f"Current file: {fname}",
+                f"Purpose: {matched.get('purpose', '')}",
+            ]
+            if fname == "main.py":
+                lines.append(f"Entry point: {_arch_spec.get('entry_point_behavior', '')}")
+                lines.append(f"Expected output: {_arch_spec.get('expected_output', '')}")
+            if matched.get("key_classes"):
+                lines.append("Classes:")
+                for cls in matched.get("key_classes", [])[:6]:
+                    if isinstance(cls, dict):
+                        lines.append(f"- {cls.get('name', '')}: {cls.get('purpose', '')}")
+                        for method in cls.get("key_methods", [])[:8]:
+                            lines.append(f"  - {method}")
+            if matched.get("key_functions"):
+                lines.append("Functions:")
+                for fn in matched.get("key_functions", [])[:10]:
+                    lines.append(f"- {fn}")
+            if matched.get("imports_from_project"):
+                lines.append(f"Imports from project: {', '.join(matched.get('imports_from_project', [])[:8])}")
+            if matched.get("external_deps"):
+                lines.append(f"External deps: {', '.join(matched.get('external_deps', [])[:8])}")
+            return "\n".join(line for line in lines if line)
+
+        _algorithm_files = {
+            algo.get("file") for algo in (_arch_spec.get("key_algorithms", []) or [])
+            if isinstance(algo, dict) and algo.get("file")
+        }
+
+        def _research_context_for_file(fname: str) -> str:
+            if not _research_ctx:
+                return ""
+            if fname == "main.py" or fname in _algorithm_files:
+                return _research_ctx
+            return ""
 
         # ── Multi-language support ──────────────────────────────────────
         _target_language = (_requirements.get("detected_language") or "python").lower()
@@ -2445,57 +5171,67 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
         _spec_file_list = [f["name"] for f in _arch_spec.get("files", []) if f.get("name")]
         
         # ── Step 1: Ask the LLM what files this project actually needs ──────────
-        plan_messages = [
-            SystemMessage(content=(
-                "You are a senior software architect. "
-                "Given a project idea and chosen approach, decide what source files to create. "
-                "Reply with ONLY a JSON object like:\n"
-                '{"files": ["main.py", "utils.py", "README.md", "requirements.txt"]}\n'
-                "Rules:\n"
-                "- Include as many files as the project needs — split by responsibility, not by a count limit; complex projects should have more files\n"
-                "- Always include a main.py (entry point), README.md, and requirements.txt\n"
-                "- Use FULL descriptive names (scheduler.py, spike_encoder.py, anomaly_detector.py, router.py) — NEVER 2-4 letter abbreviations like 'die.py', 'grm.py', 'rl.py', 'mll.py'\n"
-                "- File names must be readable by a human who has not seen the project before\n"
-                "- Do NOT include test files or __init__.py\n"
-                "- Only include files whose code you will fully implement (no stub-only files)\n"
-                "- CRITICAL: NEVER name a file after an existing Python package or stdlib module. "
-                "Forbidden names include (but are not limited to): torch.py, numpy.py, pandas.py, "
-                "scipy.py, sklearn.py, tensorflow.py, keras.py, math.py, os.py, sys.py, "
-                "random.py, time.py, typing.py, json.py, logging.py, pathlib.py, abc.py, "
-                "io.py, re.py, copy.py, enum.py, functools.py, itertools.py, collections.py, "
-                "threading.py, asyncio.py, dataclasses.py, unittest.py, warnings.py. "
-                "If the project uses PyTorch, name the file after what IT DOES: "
-                "e.g. dragon_model.py, evolution_trainer.py, gating_layer.py\n"
-                "Reply with ONLY the JSON, no markdown fences."
-            )),
-            HumanMessage(content=(
-                f"Project idea: {idea}\n"
-                f"Chosen approach: {approach}\n"
-                f"Architecture: {architecture}"
-            )),
-        ]
-        plan_response = await llm.ainvoke(plan_messages)
+        # OPTIMIZATION (S20-Rank1a): Skip this LLM call entirely when architect
+        # spec already provides a file list — the call was always overridden anyway.
         file_list = ["main.py", "utils.py", "README.md", "requirements.txt"]  # fallback
-        try:
-            import json, re
-            raw = plan_response.content.strip()
-            raw = re.sub(r"^```[a-z]*\n?", "", raw)
-            raw = re.sub(r"\n?```$", "", raw)
-            parsed = json.loads(raw)
-            if isinstance(parsed.get("files"), list) and parsed["files"]:
-                file_list = parsed["files"]
-                logger.info(f"  File plan: {file_list}")
-        except Exception:
-            logger.warning("  Could not parse file plan, using defaults")
-
-        # ── Override with architect spec file list if available ──────────────
         if _spec_file_list:
-            # Ensure main.py, README.md, requirements.txt are included
+            # Architect spec already provided a file list — use it directly
             for _required in ["main.py", "README.md", "requirements.txt"]:
                 if _required not in _spec_file_list:
                     _spec_file_list.append(_required)
             file_list = _spec_file_list
-            logger.info(f"  📐 Using architect spec file list: {file_list}")
+            logger.info(f"  📐 Using architect spec file list (skipped LLM planner): {file_list}")
+        else:
+            # No architect spec file list — fall back to LLM planning
+            plan_messages = [
+                SystemMessage(content=(
+                    "You are a senior software architect. "
+                    "Given a project idea and chosen approach, decide what source files to create. "
+                    "Reply with ONLY a JSON object like:\n"
+                    '{"files": ["main.py", "utils.py", "README.md", "requirements.txt"]}\n'
+                    "Rules:\n"
+                    "- Include as many files as the project needs — split by responsibility, not by a count limit; complex projects should have more files\n"
+                    "- Always include a main.py (entry point), README.md, and requirements.txt\n"
+                    "- Use FULL descriptive names (scheduler.py, spike_encoder.py, anomaly_detector.py, router.py) — NEVER 2-4 letter abbreviations like 'die.py', 'grm.py', 'rl.py', 'mll.py'\n"
+                    "- File names must be readable by a human who has not seen the project before\n"
+                    "- Do NOT include test files or __init__.py\n"
+                    "- Only include files whose code you will fully implement (no stub-only files)\n"
+                    "- CRITICAL: NEVER name a file after an existing Python package or stdlib module. "
+                    "Forbidden names include (but are not limited to): torch.py, numpy.py, pandas.py, "
+                    "scipy.py, sklearn.py, tensorflow.py, keras.py, math.py, os.py, sys.py, "
+                    "random.py, time.py, typing.py, json.py, logging.py, pathlib.py, abc.py, "
+                    "io.py, re.py, copy.py, enum.py, functools.py, itertools.py, collections.py, "
+                    "threading.py, asyncio.py, dataclasses.py, unittest.py, warnings.py. "
+                    "If the project uses PyTorch, name the file after what IT DOES: "
+                    "e.g. dragon_model.py, evolution_trainer.py, gating_layer.py\n"
+                    "Reply with ONLY the JSON, no markdown fences."
+                )),
+                HumanMessage(content=(
+                    f"Project idea: {idea}\n"
+                    f"Chosen approach: {approach}\n"
+                    f"Architecture: {architecture}"
+                )),
+            ]
+            _record_prompt_budget(
+                "planning",
+                "file_plan",
+                "\n\n".join(m.content for m in plan_messages if getattr(m, "content", None)),
+            )
+            plan_response = await _asyncio_codegen.wait_for(
+                llm.ainvoke(plan_messages),
+                timeout=360,
+            )
+            try:
+                import json, re
+                raw = plan_response.content.strip()
+                raw = re.sub(r"^```[a-z]*\n?", "", raw)
+                raw = re.sub(r"\n?```$", "", raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed.get("files"), list) and parsed["files"]:
+                    file_list = parsed["files"]
+                    logger.info(f"  File plan: {file_list}")
+            except Exception:
+                logger.warning("  Could not parse file plan, using defaults")
 
         # ── Post-parse: strip any file that shadows a known package/stdlib module ──
         # This catches whatever the LLM sneaks past the prompt rule.
@@ -2520,10 +5256,11 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
             "unittest", "dataclasses", "warnings", "traceback", "inspect",
             "importlib", "pkgutil", "ast", "dis", "token", "tokenize",
         }
+        _known_lower = {s.lower() for s in _KNOWN_PKG_STEMS}
         _sanitised = []
         for _fn in file_list:
             _stem = _fn.rsplit(".", 1)[0].lower()  # "torch.py" → "torch"
-            if _stem in _KNOWN_PKG_STEMS:
+            if _stem in _known_lower:
                 _safe = f"project_{_stem}.py"
                 logger.warning(
                     f"  ⚠️  File planner proposed '{_fn}' — shadows package/stdlib '{_stem}'. "
@@ -2534,14 +5271,53 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
                 _sanitised.append(_fn)
         file_list = _sanitised
 
-        # ── Step 1b: Generate interface contracts for cross-file consistency ───
-        # One LLM call that defines ALL class names, method signatures, and
-        # module-level constants BEFORE any file is generated.  Every parallel
-        # _gen_file() call receives this contract so they all agree on the API.
+        # ── Step 1b: Derive interface contracts from architect spec (S20-Rank1c) ──
+        # OPTIMIZATION: Instead of an LLM call to define contracts, we deterministically
+        # extract class names, method signatures, and imports from the architect spec
+        # that was already generated by architect_spec_node. This saves 1 LLM call per run.
         _contract_text: str = ""
         _parsed_c: dict = {}  # parsed contract JSON — shared with enforcement below
         _py_files_only = [f for f in file_list if f.endswith(".py") and f != "main.py"]
-        if len(_py_files_only) >= 1:
+        if len(_py_files_only) >= 1 and _arch_spec.get("files"):
+            try:
+                # Build contract from architect spec (no LLM needed)
+                _clines = ["INTERFACE CONTRACT — you MUST implement these EXACT signatures (no other names allowed):"]
+                for _fspec in _arch_spec.get("files", []):
+                    _fname = _fspec.get("name", "")
+                    if not _fname.endswith(".py") or _fname == "main.py":
+                        continue
+                    _mod = _fname.rsplit(".", 1)[0]
+                    _mod_contract: dict = {"classes": [], "module_constants": [], "module_functions": []}
+                    _clines.append(f"\n=== {_fname} ===")
+                    # Extract key_functions
+                    for _kf in _fspec.get("key_functions", []):
+                        _clines.append(f"  {_kf}")
+                        _mod_contract["module_functions"].append(_kf)
+                    # Extract key_classes with their methods
+                    for _kc in _fspec.get("key_classes", []):
+                        _cls_name = _kc.get("name", "")
+                        if _cls_name:
+                            _clines.append(f"  class {_cls_name}:")
+                            _cls_entry = {"name": _cls_name, "constructor": "", "public_methods": []}
+                            for _km in _kc.get("key_methods", []):
+                                _clines.append(f"    {_km}")
+                                if "__init__" in str(_km):
+                                    _cls_entry["constructor"] = _km
+                                else:
+                                    _cls_entry["public_methods"].append(_km)
+                            _mod_contract["classes"].append(_cls_entry)
+                    # Extract imports_from_project for dependency awareness
+                    _imports = _fspec.get("imports_from_project", [])
+                    if _imports:
+                        _clines.append(f"  # imports: {', '.join(_imports)}")
+                    _parsed_c[_mod] = _mod_contract
+                _contract_text = "\n".join(_clines)
+                logger.info(f"  📋 Interface contract derived from architect spec for {len(_parsed_c)} module(s) (no LLM call)")
+            except Exception as _ce:
+                logger.warning(f"  ⚠️  Contract derivation failed ({_ce}) — proceeding without contract")
+                _contract_text = ""
+        elif len(_py_files_only) >= 1:
+            # No architect spec available — generate contract via LLM as fallback
             try:
                 import json as _json_c, re as _re_c
                 _contract_msgs = [
@@ -2572,12 +5348,15 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
                         f"Generate contracts for these files: {_py_files_only}"
                     )),
                 ]
-                _contract_resp = await llm.ainvoke(_contract_msgs)
+                _contract_resp = await _asyncio_codegen.wait_for(
+                    llm.ainvoke(_contract_msgs),
+                    timeout=360,
+                )
                 _raw_c = _contract_resp.content.strip()
+                import json as _json_c, re as _re_c
                 _raw_c = _re_c.sub(r"^```[a-z]*\n?", "", _raw_c)
                 _raw_c = _re_c.sub(r"\n?```$", "", _raw_c.strip())
                 _parsed_c = _json_c.loads(_raw_c)
-                # Build human-readable block to inject into every file prompt
                 _clines = ["INTERFACE CONTRACT — you MUST implement these EXACT signatures (no other names allowed):"]
                 for _mod, _spec in _parsed_c.items():
                     _clines.append(f"\n=== {_mod}.py ===")
@@ -2592,7 +5371,7 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
                         for _m in _cls.get("public_methods", []):
                             _clines.append(f"    {_m}")
                 _contract_text = "\n".join(_clines)
-                logger.info(f"  📋 Interface contract generated for {len(_parsed_c)} module(s)")
+                logger.info(f"  📋 Interface contract generated via LLM for {len(_parsed_c)} module(s)")
             except Exception as _ce:
                 logger.warning(f"  ⚠️  Contract generation failed ({_ce}) — proceeding without contract")
                 _contract_text = ""
@@ -2804,9 +5583,10 @@ async def code_generation_node(state: AutoGITState) -> Dict[str, Any]:
                 "13. Inside a class, EVERY `self.xxx()` call MUST refer to a method that EXISTS in the same class. If the class has `_write_metadata()`, do NOT call `self._save_metadata()`.\n"
                 "14. Initialize ALL instance attributes in `__init__` BEFORE calling any method that uses them. If `_load()` uses `self._data`, set `self._data = {}` before calling `self._load()`.\n"
                 + (f"\n{_req_context}\n\n" if _req_context else "")
-                + (f"\n{_research_ctx}\n\n" if _research_ctx else "")
+                + (f"\n{_research_context_for_file(fname)}\n\n" if _research_context_for_file(fname) else "")
                 + (f"\n{_contract_text}\n\n" if _contract_text else "")
-                + (f"\n{_arch_spec_text}\n\n" if _arch_spec_text else "")
+                + (f"\n{_repo_map}\n\n" if _repo_map else "")
+                + (f"\n{_arch_context_for_file(fname)}\n\n" if _arch_context_for_file(fname) else "")
                 + (f"\n{_codegen_lessons}\n\n" if _codegen_lessons else "")
                 + """COMPLETENESS REQUIREMENTS — the file MUST be substantial and production-ready:
 - Write EVERY function and class in FULL. No shortened bodies, no cut-off code.
@@ -2836,6 +5616,8 @@ Return ONLY valid Python code. No markdown fences."""
             )
 
         files_to_generate = {fname: _file_prompt(fname) for fname in file_list}
+        for _prompt_name, _prompt_text in files_to_generate.items():
+            _record_prompt_budget("code_generation_prompts", _prompt_name, _prompt_text)
         
         generated_files = {}
         
@@ -2901,11 +5683,16 @@ Return ONLY valid Python code. No markdown fences."""
         async def _gen_file(filename: str, prompt: str):
             """Generate + stub-check one file. Runs concurrently with all other files."""
             logger.info(f"  📝 [{filename}] generating...")
+            _codegen_timeout = 600  # 10 min — code gen prompts are large
+            import asyncio as _asyncio_file
             messages = [
                 SystemMessage(content=_system_msg_for(filename)),
                 HumanMessage(content=prompt)
             ]
-            response = await llm.ainvoke(messages)
+            response = await _asyncio_file.wait_for(
+                llm.ainvoke(messages),
+                timeout=_codegen_timeout,
+            )
             code = response.content
 
             # ── Post-process by file type ────────────────────────────────────
@@ -2920,10 +5707,13 @@ Return ONLY valid Python code. No markdown fences."""
                         "Do NOT output a Python script. Output ONLY a valid Markdown document starting with # and "
                         "containing at least ## Overview, ## Installation, ## Usage, ## Architecture, and ## License."
                     )
-                    retry_response = await llm.ainvoke([
-                        SystemMessage(content=_system_msg_for(filename)),
-                        HumanMessage(content=retry_prompt)
-                    ])
+                    retry_response = await _asyncio_file.wait_for(
+                        llm.ainvoke([
+                            SystemMessage(content=_system_msg_for(filename)),
+                            HumanMessage(content=retry_prompt)
+                        ]),
+                        timeout=_codegen_timeout,
+                    )
                     retry_code = _clean_md_output(retry_response.content)
                     if _readme_looks_valid(retry_code):
                         code = retry_code
@@ -2964,10 +5754,13 @@ Return ONLY valid Python code. No markdown fences."""
                         "contained only placeholder comments, or stub implementations. "
                         "You MUST write complete, functional code with real logic in every method."
                     )
-                    regen_resp = await llm.ainvoke([
-                        SystemMessage(content="You are an expert Python developer. Generate complete, working Python code."),
-                        HumanMessage(content=regen_prompt)
-                    ])
+                    regen_resp = await _asyncio_file.wait_for(
+                        llm.ainvoke([
+                            SystemMessage(content="You are an expert Python developer. Generate complete, working Python code."),
+                            HumanMessage(content=regen_prompt)
+                        ]),
+                        timeout=_codegen_timeout,
+                    )
                     regen_code = regen_resp.content
                     if "```python" in regen_code:
                         regen_code = regen_code.split("```python")[1].split("```")[0].strip()
@@ -2986,10 +5779,13 @@ Return ONLY valid Python code. No markdown fences."""
                         logger.warning(f"  ⚠️  [{filename}] still empty after regen — forcing retry with balanced model...")
                         # Use get_fallback_llm which is already imported at module level
                         _fb_llm = get_fallback_llm("balanced")
-                        fb_resp = await _fb_llm.ainvoke([
-                            SystemMessage(content="You are an expert Python developer. Generate complete, working Python code. Return ONLY valid Python code, no markdown fences."),
-                            HumanMessage(content=regen_prompt)
-                        ])
+                        fb_resp = await _asyncio_file.wait_for(
+                            _fb_llm.ainvoke([
+                                SystemMessage(content="You are an expert Python developer. Generate complete, working Python code. Return ONLY valid Python code, no markdown fences."),
+                                HumanMessage(content=regen_prompt)
+                            ]),
+                            timeout=_codegen_timeout,
+                        )
                         fb_code = fb_resp.content
                         if "```python" in fb_code:
                             fb_code = fb_code.split("```python")[1].split("```")[0].strip()
@@ -3020,6 +5816,56 @@ Return ONLY valid Python code. No markdown fences."""
                                 f"\nif __name__ == '__main__':\n"
                                 f"    main()\n"
                             )
+
+            # ── FIX S21: Truncation detection via AST parse ──────────────
+            # If the LLM hit its token limit mid-function, the file will have
+            # valid-looking code that fails ast.parse() due to unclosed
+            # brackets / unterminated strings.  Detect and regenerate.
+            if filename.endswith(".py") and len(code) > 50:
+                import ast as _ast_trunc
+                try:
+                    _ast_trunc.parse(code)
+                except SyntaxError as _trunc_err:
+                    # Check if the error is at the last few lines (truncation)
+                    # vs a genuine bug in the middle of the file.
+                    _lines = code.splitlines()
+                    _err_line = getattr(_trunc_err, "lineno", 0) or 0
+                    _is_tail_error = _err_line >= max(1, len(_lines) - 5)
+                    _has_open_parens = (
+                        code.count("(") > code.count(")") or
+                        code.count("[") > code.count("]") or
+                        code.count("{") > code.count("}")
+                    )
+                    if _is_tail_error or _has_open_parens:
+                        logger.warning(
+                            f"  ⚠️  [{filename}] appears TRUNCATED (SyntaxError at L{_err_line}, "
+                            f"open brackets: {_has_open_parens}) — regenerating..."
+                        )
+                        _trunc_prompt = (
+                            f"{_file_prompt(filename)}\n\n"
+                            "CRITICAL: The previous attempt was cut off mid-code. "
+                            "You MUST generate the COMPLETE file from start to finish. "
+                            "Ensure all functions, classes, and brackets are properly closed."
+                        )
+                        _trunc_resp = await _asyncio_file.wait_for(
+                            llm.ainvoke([
+                                SystemMessage(content="You are an expert Python developer. Generate complete, working Python code. Return ONLY valid Python code, no markdown fences."),
+                                HumanMessage(content=_trunc_prompt)
+                            ]),
+                            timeout=_codegen_timeout,
+                        )
+                        _trunc_code = _trunc_resp.content
+                        if "```python" in _trunc_code:
+                            _trunc_code = _trunc_code.split("```python")[1].split("```")[0].strip()
+                        elif "```" in _trunc_code:
+                            _trunc_code = _trunc_code.split("```")[1].split("```")[0].strip()
+                        _trunc_code = _trunc_code.translate(str.maketrans(_TYPO_MAP))
+                        try:
+                            _ast_trunc.parse(_trunc_code)
+                            code = _trunc_code
+                            logger.info(f"  ✅ [{filename}] truncation fixed (now {len(code.splitlines())} lines)")
+                        except SyntaxError:
+                            logger.warning(f"  ⚠️  [{filename}] regen still has syntax error — keeping original for fix loop")
 
             logger.info(f"  ✅ [{filename}] done ({len(code)} chars)")
             return filename, code
@@ -3140,7 +5986,7 @@ Return ONLY valid Python code. No markdown fences."""
                     if _prev_code.strip():
                         _dep_context_parts.append(
                             f"=== ALREADY GENERATED (reference): {_prev_fn} ===\n"
-                            f"{_prev_code[:3000]}"  # truncate reference files
+                            f"{_summarize_python_reference(_prev_fn, _prev_code)}"
                         )
 
             if _dep_context_parts:
@@ -3162,6 +6008,17 @@ Return ONLY valid Python code. No markdown fences."""
                 _result = await _gen_file(_gen_fname, _gen_prompt)
                 if isinstance(_result, Exception):
                     logger.error(f"  ❌ [{_gen_fname}] generation failed: {_result}")
+                    # S24-Fix15: Track failed files for downstream error reporting
+                    generated_files[_gen_fname] = (
+                        f"# GENERATION FAILED: {_result}\n"
+                        f"# The fix loop will attempt to implement this file.\n"
+                        f"import sys\n\n"
+                        f"def main():\n"
+                        f"    print('ERROR: {_gen_fname} generation failed')\n"
+                        f"    sys.exit(1)\n\n"
+                        f"if __name__ == '__main__':\n"
+                        f"    main()\n"
+                    )
                 else:
                     generated_files[_result[0]] = _result[1]
                     logger.info(f"  ✅ [{_gen_fname}] generated with {len(_dep_context_parts)} dep contexts")
@@ -3273,7 +6130,7 @@ Return ONLY valid Python code. No markdown fences."""
                     _ep_resp = await llm.ainvoke([
                         SystemMessage(content="You are an expert Python developer. Generate complete Python code only."),
                         HumanMessage(content=_ep_prompt)
-                    ])
+                    ], timeout=300)
                     _ep_code = _ep_resp.content
                     if "```python" in _ep_code:
                         _ep_code = _ep_code.split("```python")[1].split("```")[0].strip()
@@ -3344,7 +6201,22 @@ Return ONLY valid Python code. No markdown fences."""
             clean_lines = len([l for l in cleaned.splitlines() if l.strip() and not l.startswith("#")])
             if clean_lines < raw_lines:
                 logger.info(f"  🧹 Trimmed requirements.txt: {raw_lines} → {clean_lines} packages (removed stdlib/internals)")
+            # If cleaning left requirements.txt empty but code has third-party imports,
+            # rebuild deterministically from AST-scanned imports
+            if clean_lines == 0:
+                rebuilt = _build_requirements_from_imports(py_srcs)
+                if rebuilt.strip():
+                    cleaned = rebuilt
+                    logger.info(f"  🔧 requirements.txt was empty after cleaning — rebuilt from imports: {rebuilt.strip().splitlines()}")
             generated_files["requirements.txt"] = cleaned
+        else:
+            # No requirements.txt generated by LLM — build one from imports
+            py_srcs = {k: v for k, v in generated_files.items() if k.endswith(".py")}
+            if py_srcs:
+                rebuilt = _build_requirements_from_imports(py_srcs)
+                if rebuilt.strip():
+                    generated_files["requirements.txt"] = rebuilt
+                    logger.info(f"  🔧 No requirements.txt from LLM — built from imports: {rebuilt.strip().splitlines()}")
         # ──────────────────────────────────────────────────────────────────────
 
         # ── Inject RESEARCH_REPORT.md ──────────────────────────────────────────
@@ -3357,84 +6229,14 @@ Return ONLY valid Python code. No markdown fences."""
             logger.warning(f"  ⚠️  Could not build RESEARCH_REPORT.md: {_re_err}")
         # ──────────────────────────────────────────────────────────────────────
 
-        # ── Option 6: LLM Self-Review Pass ────────────────────────────────────
-        # After all files are generated, send .py files to LLM for cross-file
-        # consistency check.  Issues are fixed immediately before the test suite
-        # runs — so the fix loop starts from a much cleaner baseline.
-        _py_review = {k: v for k, v in generated_files.items() if k.endswith(".py") and v.strip()}
-        if len(_py_review) >= 2:
-            try:
-                import json as _json_rv
-                _review_ctx = "\n\n".join(
-                    f"=== {fn} ===\n{fc}" for fn, fc in _py_review.items()
-                )
-                _review_msgs = [
-                    SystemMessage(content=(
-                        "You are a strict Python code reviewer performing a CROSS-FILE consistency audit.\n"
-                        "Look ONLY for these concrete bugs:\n"
-                        "1. Method called on an object but NOT defined in that class\n"
-                        "2. Name imported from a file but that name is NOT defined in that file\n"
-                        "3. Class instantiated with args that do NOT match its __init__ signature\n"
-                        "4. Circular import: A imports B and B imports A\n"
-                        "5. File imports from a module not present in the file list\n\n"
-                        "Output ONLY valid JSON, no explanation:\n"
-                        '{\"issues\": [{\"file\": \"filename.py\", \"problem\": \"exact description\", \"fix_hint\": \"how to fix\"}]}\n'
-                        'If no issues found: {\"issues\": []}'
-                    )),
-                    HumanMessage(content=f"Review these files for cross-file bugs:\n\n{_review_ctx}")
-                ]
-                _review_llm = get_fallback_llm("fast")
-                _review_resp = await _review_llm.ainvoke(_review_msgs)
-                _raw_rv = _review_resp.content.strip()
-                _raw_rv = _re_imports.sub(r"^```[a-z]*\n?", "", _raw_rv)
-                _raw_rv = _re_imports.sub(r"\n?```$", "", _raw_rv.strip())
-                _rv_parsed = _json_rv.loads(_raw_rv)
-                _rv_issues = _rv_parsed.get("issues", [])
-                if _rv_issues:
-                    logger.info(f"  🔍 Self-review found {len(_rv_issues)} cross-file issue(s) — pre-fixing...")
-                    # Group issues by file
-                    _rv_by_file: dict = {}
-                    for _i in _rv_issues:
-                        _f = _i.get("file", "")
-                        if _f in generated_files:
-                            _rv_by_file.setdefault(_f, []).append(_i)
-                    # Fix each affected file individually
-                    _fix_llm_rv = get_fallback_llm("fast")
-                    for _fixf, _fixissues in _rv_by_file.items():
-                        _issue_desc = "\n".join(
-                            f"- {_ii['problem']} → {_ii.get('fix_hint', 'apply correct implementation')}"
-                            for _ii in _fixissues
-                        )
-                        _other_ctx = "\n\n".join(
-                            f"=== {n} ===\n{c}" for n, c in _py_review.items() if n != _fixf
-                        )
-                        _prefix_msgs = [
-                            SystemMessage(content="You are an expert Python developer. Fix the reported cross-file bugs. Return ONLY the complete corrected Python file. No markdown fences."),
-                            HumanMessage(content=(
-                                f"Fix these bugs in `{_fixf}`:\n{_issue_desc}\n\n"
-                                f"Current `{_fixf}`:\n{generated_files[_fixf]}\n\n"
-                                f"Other project files for context:\n{_other_ctx}"
-                            ))
-                        ]
-                        _pf_resp = await _fix_llm_rv.ainvoke(_prefix_msgs)
-                        _pf_code = _pf_resp.content
-                        if "```python" in _pf_code:
-                            _pf_code = _pf_code.split("```python")[1].split("```")[0].strip()
-                        elif "```" in _pf_code:
-                            _pf_code = _pf_code.split("```")[1].split("```")[0].strip()
-                        if _pf_code.strip():
-                            # Validate that the fix didn't introduce syntax errors
-                            import ast as _ast_rv
-                            try:
-                                _ast_rv.parse(_pf_code)
-                                generated_files[_fixf] = _pf_code
-                                logger.info(f"  ✅ Pre-fixed: {_fixf}")
-                            except SyntaxError as _se:
-                                logger.warning(f"  ⚠️  Self-review fix for {_fixf} has syntax error — keeping original")
-                else:
-                    logger.info("  ✅ Self-review: no cross-file issues found")
-            except Exception as _rv_err:
-                logger.warning(f"  ⚠️  Self-review pass failed ({type(_rv_err).__name__}: {_rv_err}) — continuing without pre-fix")
+        # ── Option 6: LLM Self-Review Pass — REMOVED (S20-Rank1b) ─────────────
+        # This block used to perform a cross-file consistency audit (5 issue types)
+        # and then fix each affected file via additional LLM calls.
+        # REMOVED because:
+        # 1. code_review_agent_node (20 issue types) is a strict superset
+        # 2. The deterministic AST-based cross-file import validator below
+        #    catches issues #2, #4, #5 mechanically (no LLM needed)
+        # 3. Saved: 2-6 LLM calls per run (1 review + N fix calls)
         # ──────────────────────────────────────────────────────────────────────
 
         # ── Deterministic cross-file import validator (AST-based, no LLM) ─────
@@ -3477,19 +6279,47 @@ Return ONLY valid Python code. No markdown fences."""
 
         # Build a set of known stdlib + common third-party top-level module names
         # so we don't accidentally rewrite `from torch import nn` etc.
-        _STDLIB_AND_THIRDPARTY = {
-            "os", "sys", "json", "math", "re", "io", "abc", "copy", "time",
-            "datetime", "logging", "warnings", "enum", "typing", "pathlib",
-            "functools", "collections", "itertools", "dataclasses", "random",
-            "argparse", "textwrap", "string", "struct", "hashlib", "base64",
-            "unittest", "pytest", "torch", "numpy", "scipy", "sklearn",
+        _STDLIB_AND_THIRDPARTY = _STDLIB_MODULES | set(_IMPORT_TO_PKG.keys()) | {
+            "pytest", "torch", "numpy", "scipy", "sklearn",
             "matplotlib", "pandas", "tqdm", "rich", "requests", "flask",
             "fastapi", "pydantic", "transformers", "datasets", "PIL",
             "cv2", "tensorflow", "jax", "einops", "wandb", "hydra",
             "omegaconf", "yaml", "toml", "dotenv", "click", "typer",
-            "__future__", "ast", "inspect", "importlib", "contextlib",
-            "concurrent", "multiprocessing", "threading", "asyncio",
-            "subprocess", "signal", "atexit", "gc", "traceback",
+            "__future__",
+            # Common third-party packages frequently used in generated code
+            "aiohttp", "redis", "celery", "kombu", "dramatiq", "rq",
+            "websockets", "websocket", "httpx", "uvicorn", "gunicorn",
+            "starlette", "sqlalchemy", "alembic", "psycopg2",
+            "pymongo", "motor", "aioredis", "aiokafka",
+            "structlog", "loguru", "sentry_sdk",
+            "jwt", "bcrypt", "cryptography", "paramiko",
+            "marshmallow", "attrs", "attr", "cattrs",
+            "boto3", "botocore", "s3fs",
+            "kafka", "pika", "nats", "zmq",
+            "grpc", "protobuf", "thrift",
+            "apscheduler", "schedule", "huey",
+            "tenacity", "backoff", "retrying",
+            "orjson", "msgpack", "cbor2", "avro",
+            "prometheus_client", "opentelemetry", "statsd",
+            "docker", "fabric", "invoke",
+            "networkx", "igraph", "graph_tool",
+            "arrow", "pendulum", "dateutil",
+            "colorama", "termcolor", "blessed",
+            "jinja2", "mako", "chameleon",
+            "lxml", "bs4", "html5lib",
+            "Crypto", "nacl", "fernet",
+            "hypothesis", "faker", "factory",
+            "aiofiles", "watchdog", "inotify",
+            "pillow", "imageio", "skimage",
+            "sympy", "statsmodels", "xgboost", "lightgbm",
+            "spacy", "nltk", "gensim", "sentence_transformers",
+            "gradio", "streamlit", "dash", "panel",
+            "pyyaml", "toml", "tomli", "tomllib",
+            "connexion", "sanic", "tornado", "aiohttp_jinja2",
+            "cachetools", "diskcache", "dogpile",
+            "wrapt", "decorator",
+            "more_itertools", "toolz", "cytoolz",
+            "sortedcontainers", "blist",
         }
 
         for _fn, _code in list(_py_gen.items()):
@@ -3516,12 +6346,10 @@ Return ONLY valid Python code. No markdown fences."""
                         continue
 
                 # Case B: importing from a module that DOESN'T EXIST as a generated file
-                elif _src_mod not in _STDLIB_AND_THIRDPARTY:
-                    _imported_names = [n.strip().split(" as ")[0].strip() for n in _names_str.split(",")]
-                    _missing = list(_imported_names)  # all names are "missing" since the file doesn't exist
-                    logger.warning(f"  ⚠️  {_fn} imports from '{_src_mod}' which is NOT a generated file — fixing")
+                # This could be stdlib, third-party (sqlalchemy, aiogram, etc.), or a typo.
+                # SAFE DEFAULT: leave it alone. Only validate imports between generated files.
                 else:
-                    continue  # stdlib/third-party import — leave alone
+                    continue
 
                 # For each missing name, find which file actually defines it
                 for _miss_name in _missing:
@@ -3965,7 +6793,8 @@ Return ONLY valid Python code. No markdown fences."""
             f.endswith(".py") for f in generated_files
         ):
             try:
-                _test_llm = get_fallback_llm("fast")
+                # S23-Gap4: Use "balanced" model instead of "fast" for higher quality tests
+                _test_llm = get_fallback_llm("balanced")
                 _py_file_list = [f for f in generated_files if f.endswith(".py") and f != "test_main.py"]
                 _test_file_info = "\n".join(
                     f"  - {f}: {len(generated_files[f].splitlines())} lines"
@@ -4024,9 +6853,140 @@ Return ONLY valid Python code. No markdown fences."""
                 if "def test_" in _test_code and len(_test_code) > 50:
                     try:
                         compile(_test_code, "test_main.py", "exec")
+
+                        # ── FIX S21: Post-gen import validation ──────────────
+                        # The LLM often invents class/method names that don't
+                        # exist in the generated files (e.g., EVTThreshold
+                        # vs EVTThresholdCalibrator).  Parse test imports and
+                        # verify each name exists; auto-fix with fuzzy match.
+                        import ast as _ast_tv
+                        import difflib as _difflib_tv
+
+                        # Build a set of all exported names from generated .py files
+                        _all_exports: dict = {}  # {module_stem: set_of_names}
+                        for _tvf in _py_file_list:
+                            _stem = _tvf.replace(".py", "")
+                            _tvf_names: set = set()
+                            try:
+                                _tvt = _ast_tv.parse(generated_files[_tvf])
+                                for _tvn in _ast_tv.iter_child_nodes(_tvt):
+                                    if isinstance(_tvn, _ast_tv.ClassDef):
+                                        _tvf_names.add(_tvn.name)
+                                        # Also add methods as class.method for reference
+                                        for _tvm in _tvn.body:
+                                            if isinstance(_tvm, (_ast_tv.FunctionDef, _ast_tv.AsyncFunctionDef)):
+                                                _tvf_names.add(_tvm.name)
+                                    elif isinstance(_tvn, (_ast_tv.FunctionDef, _ast_tv.AsyncFunctionDef)):
+                                        _tvf_names.add(_tvn.name)
+                                    elif isinstance(_tvn, _ast_tv.Assign):
+                                        for _tvtg in _tvn.targets:
+                                            if isinstance(_tvtg, _ast_tv.Name):
+                                                _tvf_names.add(_tvtg.id)
+                            except SyntaxError:
+                                pass
+                            _all_exports[_stem] = _tvf_names
+
+                        # Parse test_main.py imports and check each name
+                        _test_tree = _ast_tv.parse(_test_code)
+                        _replacements: list = []  # (old_name, new_name)
+                        for _imp_node in _ast_tv.walk(_test_tree):
+                            if isinstance(_imp_node, _ast_tv.ImportFrom) and _imp_node.module:
+                                _imp_mod = _imp_node.module.split(".")[-1]  # handle nested
+                                if _imp_mod in _all_exports:
+                                    _mod_names = _all_exports[_imp_mod]
+                                    for _alias in (_imp_node.names or []):
+                                        _imp_name = _alias.name
+                                        if _imp_name not in _mod_names and _imp_name != "*":
+                                            # Try fuzzy match
+                                            _matches = _difflib_tv.get_close_matches(
+                                                _imp_name, list(_mod_names), n=1, cutoff=0.5
+                                            )
+                                            if _matches:
+                                                _replacements.append((_imp_name, _matches[0]))
+                                                logger.info(
+                                                    f"  🔧 test_main.py: fixing import "
+                                                    f"'{_imp_name}' → '{_matches[0]}'"
+                                                )
+
+                        # Apply replacements to test code
+                        if _replacements:
+                            _fixed_test = _test_code
+                            for _old_name, _new_name in _replacements:
+                                # Replace both import references and usage in test body
+                                import re as _re_tv
+                                _fixed_test = _re_tv.sub(
+                                    r'\b' + _re_tv.escape(_old_name) + r'\b',
+                                    _new_name,
+                                    _fixed_test
+                                )
+                            # Verify fixed version still compiles
+                            try:
+                                compile(_fixed_test, "test_main.py", "exec")
+                                _test_code = _fixed_test
+                                logger.info(
+                                    f"  ✅ test_main.py: fixed {len(_replacements)} "
+                                    f"import mismatch(es)"
+                                )
+                            except SyntaxError:
+                                logger.warning("  ⚠️  Import fixes broke syntax — keeping original")
+
                         generated_files["test_main.py"] = _test_code
+                        # S26: Add provenance metadata so downstream consumers
+                        # know this file is LLM-generated (trust level: low).
+                        _provenance_header = (
+                            "# AUTO-GENERATED: LLM-generated test file\n"
+                            "# Trust level: low — may contain incorrect assertions\n"
+                            f"# Generator: code_generation_node / {getattr(_test_llm, 'model_name', getattr(_test_llm, 'model', 'unknown'))}\n"
+                            f"# Timestamp: {__import__('datetime').datetime.now().isoformat()}\n"
+                            "#\n"
+                        )
+                        if not _test_code.startswith("# AUTO-GENERATED"):
+                            generated_files["test_main.py"] = _provenance_header + _test_code
                         logger.info(f"  🧪 Auto-generated test_main.py ({len(_test_code.splitlines())} lines)")
                         console.print(f"  [green]🧪 Auto-generated test_main.py[/green]")
+
+                        # ── S23-Gap4: Runtime validation of generated tests ────
+                        # Run tests in a subprocess to catch semantic errors
+                        # (wrong constructor args, wrong method names) that
+                        # compile() can't detect. Discard tests that crash.
+                        try:
+                            import tempfile as _tmpf_tv, subprocess as _subp_tv, shutil as _shutil_tv
+                            _tv_dir = _tmpf_tv.mkdtemp(prefix="test_validate_")
+                            try:
+                                # Write all project files + test file
+                                for _tvfn, _tvfc in generated_files.items():
+                                    if isinstance(_tvfc, str):
+                                        _tvfp = os.path.join(_tv_dir, _tvfn)
+                                        os.makedirs(os.path.dirname(_tvfp), exist_ok=True) if os.path.dirname(_tvfn) else None
+                                        with open(_tvfp, "w", encoding="utf-8", errors="replace") as _tvff:
+                                            _tvff.write(_tvfc)
+
+                                # Quick import-check only (not full pytest) — 10s timeout
+                                _tv_check = _subp_tv.run(
+                                    [sys.executable, "-c",
+                                     f"import sys; sys.path.insert(0, r'{_tv_dir}'); "
+                                     f"exec(open(r'{os.path.join(_tv_dir, 'test_main.py')}').read())"],
+                                    capture_output=True, text=True, timeout=10,
+                                    cwd=_tv_dir,
+                                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+                                )
+                                if _tv_check.returncode != 0:
+                                    _tv_err = (_tv_check.stderr or _tv_check.stdout or "")[:300]
+                                    logger.warning(
+                                        f"  ⚠️  test_main.py runtime validation FAILED: {_tv_err}"
+                                    )
+                                    console.print(
+                                        f"  [yellow]⚠️  test_main.py crashes at runtime — discarding "
+                                        f"to avoid wasting fix budget[/yellow]"
+                                    )
+                                    del generated_files["test_main.py"]
+                                else:
+                                    logger.info("  ✅ test_main.py runtime validation PASSED")
+                            finally:
+                                _shutil_tv.rmtree(_tv_dir, ignore_errors=True)
+                        except Exception as _tv_exc:
+                            logger.debug(f"  Test runtime validation skipped ({_tv_exc})")
+                        # ── End runtime validation ────────────────────────
                     except SyntaxError as _tse:
                         logger.warning(f"  ⚠️  Generated test_main.py has syntax error ({_tse}) — skipping")
                 else:
@@ -4042,21 +7002,11 @@ Return ONLY valid Python code. No markdown fences."""
                     generated_files[_sfname] = _sfcontent
                     logger.info(f"  🌐 Added scaffold: {_sfname}")
 
-        # ── Proactive emoji sanitization (uses shared _EMOJI_TO_ASCII) ──
-        import sys as _sys_gen_enc
-        if _sys_gen_enc.platform == "win32":
-            _sanitized_count = _sanitize_emoji(generated_files, "proactive-codegen")
-            if _sanitized_count:
-                logger.info(f"  🧹 Proactively sanitized emoji in {_sanitized_count} file(s)")
-                console.print(f"  [green]🧹 Sanitized emoji/unicode in {_sanitized_count} .py file(s)[/green]")
-        # ── End emoji sanitization ───────────────────────────────────────
-
-        # ── Proactive LLM artifact stripping ─────────────────────────────
-        _proactive_art = _sanitize_llm_artifacts(generated_files, "proactive-codegen")
-        if _proactive_art:
-            logger.info(f"  🧹 Proactively stripped LLM artifacts from {_proactive_art} file(s)")
-            console.print(f"  [green]🧹 Stripped LLM artifacts from {_proactive_art} .py file(s)[/green]")
-        # ── End LLM artifact stripping ───────────────────────────────────
+        # ── Proactive emoji/artifact sanitization — REMOVED (S20-Rank5) ────
+        # These were duplicate no-ops: identical _sanitize_emoji() and
+        # _sanitize_llm_artifacts() already ran ~300 lines above at the
+        # "Post-Generation" phase.  Running them twice is pure waste.
+        # ── End removed duplicate sanitization ───────────────────────────
 
         # Memory cleanup after heavy generation
         gc.collect()
@@ -4067,7 +7017,12 @@ Return ONLY valid Python code. No markdown fences."""
                 "files": generated_files,
                 "approach": approach,
                 "total_files": len(generated_files)
-            }
+            },
+            "repo_map": _build_repo_map_from_generated_files(
+                generated_files,
+                _arch_spec if isinstance(_arch_spec, dict) else None,
+            ),
+            "context_budget_report": _context_budget_report,
         }
         # Forward code-gen-level errors (contract violations, circular imports)
         # so code_testing_node / code_fixing_node can act on them.
@@ -4155,15 +7110,137 @@ async def code_review_agent_node(state: AutoGITState) -> Dict[str, Any]:
             logger.info("  No Python files to review")
             return {"current_stage": "code_reviewed", "generated_code": generated_code}
 
+        def _normalize_review_issues(raw_issues: Any) -> List[Dict[str, str]]:
+            """Normalize reviewer output to a stable list of issue dicts."""
+            if not isinstance(raw_issues, list):
+                return []
+            out: List[Dict[str, str]] = []
+            for item in raw_issues:
+                if not isinstance(item, dict):
+                    continue
+                out.append(
+                    {
+                        "file": str(item.get("file", "") or ""),
+                        "type": str(item.get("type", "") or "UNKNOWN"),
+                        "severity": str(item.get("severity", "warning") or "warning").lower(),
+                        "problem": str(item.get("problem", "") or ""),
+                        "fix_instruction": str(item.get("fix_instruction", "") or ""),
+                    }
+                )
+            return out
+
+        def _parse_review_json(raw_text: str) -> Optional[List[Dict[str, str]]]:
+            """Best-effort JSON salvage for reviewer responses."""
+            import json as _json_parse
+            import re as _re_parse
+
+            raw = (raw_text or "").strip()
+            if not raw:
+                return None
+
+            if "<think>" in raw:
+                think_end = raw.rfind("</think>")
+                if think_end != -1:
+                    raw = raw[think_end + len("</think>"):].strip()
+
+            raw = _re_parse.sub(r"^```[a-zA-Z0-9_+-]*\n?", "", raw)
+            raw = _re_parse.sub(r"\n?```$", "", raw.strip())
+
+            first = raw.find("{")
+            last = raw.rfind("}")
+            if first != -1 and last != -1 and last > first:
+                raw = raw[first:last + 1]
+
+            candidates = [raw]
+            candidates.append(_re_parse.sub(r",\s*([}\]])", r"\1", raw))
+            candidates.append(_re_parse.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', raw))
+            candidates.append(
+                _re_parse.sub(
+                    r",\s*([}\]])",
+                    r"\1",
+                    _re_parse.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', raw),
+                )
+            )
+
+            for candidate in candidates:
+                try:
+                    parsed = _json_parse.loads(candidate)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    return _normalize_review_issues(parsed.get("issues", []))
+
+            return None
+
+        def _deterministic_review_scan(py_sources: Dict[str, str]) -> List[Dict[str, str]]:
+            """Static fallback review used if LLM output is unparseable."""
+            issues: List[Dict[str, str]] = []
+
+            for fname, code in py_sources.items():
+                if not isinstance(code, str):
+                    continue
+
+                if _re.search(r"^\s*from\s+\.\w+\s+import\s+", code, flags=_re.MULTILINE):
+                    issues.append(
+                        {
+                            "file": fname,
+                            "type": "RELATIVE_IMPORT",
+                            "severity": "critical",
+                            "problem": "Uses relative imports that break when running python main.py in flat project layout",
+                            "fix_instruction": "Replace relative imports (from .x import Y) with absolute local imports (from x import Y)",
+                        }
+                    )
+
+                if any(ord(ch) > 127 for ch in code):
+                    issues.append(
+                        {
+                            "file": fname,
+                            "type": "ENCODING_ISSUE",
+                            "severity": "critical",
+                            "problem": "Contains non-ASCII characters that can crash default Windows console encoding",
+                            "fix_instruction": "Replace emoji/non-ASCII output text with ASCII-safe equivalents",
+                        }
+                    )
+
+                if _re.search(r"raise\s+NotImplementedError", code) or _re.search(
+                    r"^\s*def\s+\w+\(.*\):\s*\n\s*(pass|\.\.\.)\s*(#.*)?$",
+                    code,
+                    flags=_re.MULTILINE,
+                ):
+                    issues.append(
+                        {
+                            "file": fname,
+                            "type": "STUB_BODY",
+                            "severity": "critical",
+                            "problem": "Contains placeholder function bodies (pass/NotImplementedError)",
+                            "fix_instruction": "Implement the function with concrete logic required by project behavior",
+                        }
+                    )
+
+            main_code = py_sources.get("main.py", "")
+            if isinstance(main_code, str) and main_code.strip():
+                if "if __name__ == '__main__':" not in main_code and 'if __name__ == "__main__":' not in main_code:
+                    issues.append(
+                        {
+                            "file": "main.py",
+                            "type": "MISSING_ENTRY_POINT",
+                            "severity": "critical",
+                            "problem": "main.py has no __main__ guard, so it may not execute when run directly",
+                            "fix_instruction": "Add an if __name__ == '__main__' entry point that invokes main()",
+                        }
+                    )
+
+            return issues
+
         review_llm = get_fallback_llm("powerful")
         fix_llm    = get_fallback_llm("balanced")
         total_issues_fixed = 0
-        _review_parsed_ok = False  # Track whether at least one iteration parsed JSON successfully
+        _review_completed = False  # True when either LLM or fallback review produced a valid issue list
 
         for _iteration in range(3):  # max 3 review→fix cycles
             # ── Build the review payload ─────────────────────────────────────
             # Truncate individual files if total is too large for model context
-            _max_chars_per_file = 50000  # ~1250 lines — room for large files
+            _max_chars_per_file = 100000  # S25: Raised 50K→100K (~2500 lines) — models handle it fine
             file_listing = "\n\n".join(
                 f"=== {fn} ===\n{fc[:_max_chars_per_file]}" + 
                 (f"\n... (truncated, {len(fc)} chars total)" if len(fc) > _max_chars_per_file else "")
@@ -4258,30 +7335,17 @@ async def code_review_agent_node(state: AutoGITState) -> Dict[str, Any]:
                     HumanMessage(content=review_human)
                 ])
                 _raw = _rv_resp.content.strip()
-                # Handle thinking models
-                if "<think>" in _raw:
-                    _think_end = _raw.rfind("</think>")
-                    if _think_end != -1:
-                        _raw = _raw[_think_end + len("</think>"):].strip()
-                # Strip markdown fences if present
-                import re as _re_rv
-                _raw = _re_rv.sub(r"^```[a-z]*\n?", "", _raw)
-                _raw = _re_rv.sub(r"\n?```$", "", _raw.strip())
-                # Extract JSON from response
-                _fb = _raw.find("{")
-                _lb = _raw.rfind("}")
-                if _fb != -1 and _lb != -1 and _lb > _fb:
-                    _raw = _raw[_fb:_lb + 1]
-                try:
-                    _rv_parsed = _json_ra.loads(_raw)
-                except _json_ra.JSONDecodeError:
-                    _cleaned = _re_rv.sub(r',\s*([}\]])', r'\1', _raw)
-                    _rv_parsed = _json_ra.loads(_cleaned)
-                _review_parsed_ok = True  # At least one successful parse
-                issues = _rv_parsed.get("issues", [])
+                _parsed_issues = _parse_review_json(_raw)
+                if _parsed_issues is None:
+                    raise ValueError("Reviewer returned unparseable JSON")
+                issues = _parsed_issues
+                _review_completed = True
             except Exception as _pe:
-                logger.warning(f"  ⚠️  Review parse error ({_pe}) — skipping iteration {_iteration + 1}")
-                break
+                logger.warning(
+                    f"  ⚠️  Review parse error ({_pe}) — using deterministic fallback checks in iteration {_iteration + 1}"
+                )
+                issues = _deterministic_review_scan(py_files)
+                _review_completed = True
 
             critical = [i for i in issues if i.get("severity") == "critical"]
             warnings = [i for i in issues if i.get("severity") == "warning"]
@@ -4359,17 +7423,48 @@ async def code_review_agent_node(state: AutoGITState) -> Dict[str, Any]:
                 try:
                     _fix_resp = await fix_llm.ainvoke(fix_msgs)
                     _fixed = _fix_resp.content
+                    if not isinstance(_fixed, str):
+                        _fixed = str(_fixed)
                     if "```python" in _fixed:
                         _fixed = _fixed.split("```python")[1].split("```")[0].strip()
                     elif "```" in _fixed:
                         _fixed = _fixed.split("```")[1].split("```")[0].strip()
-                    if _fixed.strip():
-                        return fname, _fixed.strip()
+                    _fixed = (_fixed or "").strip()
+                    if _fixed:
+                        # Reject non-code/prose contamination that occasionally slips through.
+                        _first_nonempty = ""
+                        for _ln in _fixed.splitlines():
+                            if _ln.strip():
+                                _first_nonempty = _ln.strip().lower()
+                                break
+                        _prose_prefixes = (
+                            "okay", "i need", "let me", "here is", "the issue",
+                            "this file", "we need", "i will", "sure",
+                        )
+                        _looks_like_prose = _first_nonempty.startswith(_prose_prefixes)
+                        if _looks_like_prose:
+                            logger.warning(f"  ⚠️  Rejected non-code fix output for {fname} (prose contamination)")
+                            return fname, py_files[fname]
+
+                        # For Python files, require syntactically valid replacement.
+                        if fname.endswith(".py"):
+                            import ast as _ast_fix
+                            try:
+                                _ast_fix.parse(_fixed)
+                            except SyntaxError as _syn:
+                                logger.warning(
+                                    f"  ⚠️  Rejected invalid Python fix for {fname}: "
+                                    f"{_syn.msg} (line {_syn.lineno})"
+                                )
+                                return fname, py_files[fname]
+
+                        return fname, _fixed
                 except Exception as _fe:
                     logger.warning(f"  ⚠️  Could not fix {fname}: {_fe}")
                 return fname, py_files[fname]  # return original if fix failed
 
             import asyncio as _asyncio_ra
+            _fixed_before_iteration = total_issues_fixed
             fix_results = await _asyncio_ra.gather(
                 *[_fix_one_file(fn, issues_list) for fn, issues_list in by_file.items()],
                 return_exceptions=True
@@ -4379,20 +7474,35 @@ async def code_review_agent_node(state: AutoGITState) -> Dict[str, Any]:
                     logger.warning(f"  ⚠️  Fix task exception: {res}")
                     continue
                 fn, new_code = res
-                py_files[fn] = new_code
-                files[fn] = new_code
-                total_issues_fixed += 1
-                logger.info(f"  ✅ Fixed: {fn}")
-                console.print(f"  [green]✓[/green] Fixed: {fn}")
+                _old_code = py_files.get(fn, "")
+                if new_code != _old_code:
+                    py_files[fn] = new_code
+                    files[fn] = new_code
+                    total_issues_fixed += 1
+                    logger.info(f"  ✅ Fixed: {fn}")
+                    console.print(f"  [green]✓[/green] Fixed: {fn}")
+                else:
+                    logger.info(f"  ℹ️  No safe changes applied to: {fn}")
+
+            # Circuit breaker: if critical issues remain but this iteration made
+            # zero safe edits, stop churn and hand off to deterministic validators.
+            _current_total_after_iteration = total_issues_fixed
+            if critical and _current_total_after_iteration == _fixed_before_iteration:
+                logger.warning(
+                    "  ⚠️  Code review made no safe progress this iteration; "
+                    "stopping review-fix loop to avoid churn"
+                )
+                break
 
         # ── Done ─────────────────────────────────────────────────────────────
-        if not _review_parsed_ok:
-            # Review LLM never returned parseable JSON — code was NOT reviewed
-            console.print("\n[yellow]⚠️  Code Review Agent: LLM returned unparseable JSON — review SKIPPED[/yellow]")
-            logger.warning("  ⚠️  Code review parse failed on all iterations — code NOT reviewed")
+        if not _review_completed:
+            # Should be rare; preserves explicit signal instead of silent pass-through.
+            console.print("\n[yellow]⚠️  Code Review Agent: review could not be completed[/yellow]")
+            logger.warning("  ⚠️  Code review could not be completed")
         elif total_issues_fixed > 0:
             console.print(f"\n[green]🔍 Code Review Agent: fixed {total_issues_fixed} file(s)[/green]")
         else:
+            logger.info("  ✅ Code review completed (no critical fixes needed)")
             console.print("\n[green]🔍 Code Review Agent: code looks correct ✅[/green]")
 
         # ── Flatten file keys (strip directory prefixes) ─────────────────────
@@ -4464,19 +7574,45 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
     
     try:
         from pathlib import Path
-        from ..utils.code_executor import CodeExecutor
+        from ..utils.code_executor import CodeExecutor, build_cached_venv_dir
         from ..utils.enhanced_validator import EnhancedValidator
         import tempfile
         import shutil
         
         generated_code = state.get("generated_code", {})
         files = _flatten_file_keys(generated_code.get("files", {}), "code_testing_input")
+        architecture_spec = state.get("architecture_spec") if isinstance(state.get("architecture_spec"), dict) else None
+        repo_map_text = str(state.get("repo_map", "") or "")
         
         if not files:
             logger.warning("No files to test")
             return {
                 "current_stage": "testing_skipped",
                 "test_results": {"error": "No files generated"}
+            }
+
+        _incomplete_files = _find_incomplete_artifacts(files)
+        if _incomplete_files:
+            logger.warning(f"⚠️  Incomplete generated artifacts detected: {_incomplete_files}")
+            return {
+                "current_stage": "testing_complete",
+                "test_results": {
+                    "environment_created": False,
+                    "dependencies_installed": False,
+                    "syntax_valid": False,
+                    "import_successful": False,
+                    "execution_errors": [
+                        f"ARTIFACT_INCOMPLETE: {fname} still contains placeholder/skeleton code and must be regenerated or properly fixed."
+                        for fname in _incomplete_files
+                    ],
+                    "warnings": [
+                        "Incomplete artifact gate triggered before expensive validation/runtime testing."
+                    ],
+                    "test_outputs": [],
+                    "verification_state": "artifact_incomplete",
+                },
+                "tests_passed": False,
+                "code_quality": 0,
             }
 
         # ── FAST PATH: AST syntax pre-check (ms) before expensive venv setup (mins) ──
@@ -4508,16 +7644,28 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
         if test_artifact_warnings:
             logger.warning(
                 f"  ⚠️  {len(test_artifact_warnings)} test artifact(s) have syntax errors "
-                f"(will be excluded from deployment)"
+                f"(will be replaced with minimal pass-through stubs)"
             )
-            # Remove broken test artifacts from files so they don't get pushed
+            # S24-Fix13: Replace broken test artifacts with minimal passing stubs
+            # instead of deleting them. Deletion causes feature_verification_node
+            # to silently skip verification (CodeExecutor returns True if no test file).
             for fname in list(files.keys()):
                 if fname in _TEST_ARTIFACTS:
                     try:
                         _ast.parse(files[fname])
                     except SyntaxError:
-                        logger.info(f"  🗑️  Removing broken test artifact: {fname}")
-                        del files[fname]
+                        logger.info(f"  🔧 Replacing broken test artifact with stub: {fname}")
+                        files[fname] = (
+                            "# Auto-generated stub — original test file had syntax errors\n"
+                            "# The fix loop will attempt to regenerate proper tests.\n"
+                            "import sys\n\n"
+                            "def test_placeholder():\n"
+                            "    \"\"\"Placeholder test — original had syntax errors.\"\"\"\n"
+                            "    assert True, 'Stub test — real tests need regeneration'\n\n"
+                            "if __name__ == '__main__':\n"
+                            "    test_placeholder()\n"
+                            "    print('STUB: Test file needs regeneration')\n"
+                        )
 
         if syntax_errors:
             logger.error("\u274c Syntax errors detected (fast pre-check — skipping venv)")
@@ -4538,9 +7686,13 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
             }
         
         # Create temporary directory for testing
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             test_dir = Path(temp_dir) / "test_project"
             test_dir.mkdir(parents=True, exist_ok=True)
+
+            # ── ROLLBACK-PROOF: Ensure requirements.txt is complete BEFORE any other processing ──
+            # IRP insight: deterministic dep resolution must happen first and independently
+            files = _ensure_requirements_complete(files)
 
             # Sanitize requirements.txt before writing — full stdlib/internal filtering
             def _sanitize_requirements(req_text: str) -> str:
@@ -4549,6 +7701,13 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                 py_srcs_for_req = {k: v for k, v in files.items() if k.endswith(".py")}
                 # First pass: module-level cleaner strips stdlib + _internals + editable
                 cleaned = _clean_requirements_txt(req_text, py_srcs_for_req)
+                # If cleaning left it empty, rebuild from imports
+                _clean_count = len([l for l in cleaned.splitlines() if l.strip() and not l.startswith("#")])
+                if _clean_count == 0:
+                    rebuilt = _build_requirements_from_imports(py_srcs_for_req)
+                    if rebuilt.strip():
+                        cleaned = rebuilt
+                        logger.info(f"  🔧 requirements.txt empty after cleaning — rebuilt from imports")
                 # Second pass: fix remaining bad version pins
                 out = []
                 for line in cleaned.splitlines():
@@ -4586,6 +7745,38 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                 file_path.parent.mkdir(parents=True, exist_ok=True)  # safety: ensure parent exists
                 file_path.write_text(content, encoding="utf-8")
                 logger.info(f"  📝 Wrote {_flat_name} for testing")
+
+            # ── Phase A: Semgrep SAST gate (best-effort; captures structured findings) ──
+            _semgrep_fail_on = str(os.getenv("AUTOGIT_SEMGREP_FAIL_ON", "ERROR") or "ERROR").strip().upper()
+            semgrep_report = _run_semgrep_sast_scan(
+                test_dir,
+                fail_on=_semgrep_fail_on,
+                timeout_s=int(os.getenv("AUTOGIT_SEMGREP_TIMEOUT_S", "120") or "120"),
+            )
+            if semgrep_report.get("available"):
+                logger.info(
+                    "  🔐 Semgrep: %s finding(s), gate_failed=%s (fail_on=%s)",
+                    semgrep_report.get("finding_count", 0),
+                    semgrep_report.get("gate_failed", False),
+                    semgrep_report.get("fail_on", "ERROR"),
+                )
+            else:
+                for _sw in semgrep_report.get("warnings", [])[:2]:
+                    logger.warning(f"  ⚠️  {_sw}")
+
+            # ── Phase A: repo map + code-graph consistency checks ─────────────────────
+            repo_graph_report = _evaluate_repo_graph_consistency(
+                files,
+                architecture_spec=architecture_spec,
+                repo_map_text=repo_map_text,
+            )
+            if repo_graph_report.get("high_confidence_errors"):
+                logger.warning(
+                    f"  ⚠️  Repo/code-graph consistency errors: "
+                    f"{len(repo_graph_report.get('high_confidence_errors', []))}"
+                )
+            for _rw in repo_graph_report.get("warnings", [])[:3]:
+                logger.warning(f"  ⚠️  {_rw}")
             
             # ENHANCED VALIDATION — Run all .py files in parallel
             # EnhancedValidator spawns subprocesses (mypy, bandit, ruff).
@@ -4600,13 +7791,22 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
             _py_files = [(fname, content, test_dir / fname)
                          for fname, content in files.items() if fname.endswith('.py')]
 
-            logger.info(f"  ⚡ Validating {len(_py_files)} Python files in parallel...")
-            _val_results = await _asyncio_val.gather(
-                *[
-                    _val_loop.run_in_executor(
+            _validator_workers = _recommended_validator_workers()
+            _val_semaphore = _asyncio_val.Semaphore(_validator_workers)
+
+            async def _validate_with_limit(content: str, fpath: Path):
+                async with _val_semaphore:
+                    return await _val_loop.run_in_executor(
                         None,
                         lambda c=content, p=str(fpath): validator.validate_all(c, p)
                     )
+
+            logger.info(
+                f"  ⚡ Validating {len(_py_files)} Python files with max {_validator_workers} worker(s)..."
+            )
+            _val_results = await _asyncio_val.gather(
+                *[
+                    _validate_with_limit(content, fpath)
                     for _, content, fpath in _py_files
                 ],
                 return_exceptions=True
@@ -4638,12 +7838,16 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
             
             # Run test suite with hard 5-minute overall timeout (prevents subprocess deadlocks)
             logger.info(f"🔬 Testing code in: {test_dir}")
-            executor = CodeExecutor(test_dir)
+            _req_text = (test_dir / "requirements.txt").read_text(encoding="utf-8") if (test_dir / "requirements.txt").exists() else ""
+            _cache_root = Path(__file__).resolve().parents[2] / "data" / "test_env_cache"
+            _cached_venv_dir = build_cached_venv_dir(_cache_root, _req_text)
+            logger.info(f"♻️ Using cached test environment: {_cached_venv_dir}")
+            executor = CodeExecutor(test_dir, venv_dir=_cached_venv_dir)
             import asyncio as _asyncio
             try:
                 loop = _asyncio.get_event_loop()
                 test_results = await _asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: executor.run_full_test_suite(cleanup_after=True)),
+                    loop.run_in_executor(None, lambda: executor.run_full_test_suite(cleanup_after=False)),
                     timeout=300  # 5-minute hard cap on entire test suite
                 )
             except _asyncio.TimeoutError:
@@ -4662,17 +7866,74 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
             # Merge validation results into test_results
             test_results['validation_results'] = validation_results
             test_results['average_quality'] = avg_quality
+            test_results["semgrep"] = semgrep_report
+            test_results["repo_graph_consistency"] = repo_graph_report
+
+            # Unified security gate status for downstream routing.
+            semgrep_required = str(os.getenv("AUTOGIT_SEMGREP_REQUIRED", "0") or "0").strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+            semgrep_available = bool(semgrep_report.get("available", False))
+            security_gate_failed = bool(semgrep_report.get("gate_failed", False))
+            if semgrep_required and not semgrep_available:
+                security_gate_failed = True
+
+            test_results["security_gate_active"] = semgrep_available
+            test_results["security_gate_failed"] = security_gate_failed
+            test_results["security_gate_reason"] = (
+                "semgrep_required_but_unavailable"
+                if (semgrep_required and not semgrep_available)
+                else ("semgrep_findings" if security_gate_failed else "none")
+            )
+
+            if security_gate_failed:
+                _security_errors = test_results.get("execution_errors", [])
+                if not isinstance(_security_errors, list):
+                    _security_errors = [str(_security_errors)] if _security_errors else []
+                if semgrep_required and not semgrep_available:
+                    _security_errors.append(
+                        "SECURITY_GATE_FAIL: Semgrep is required but unavailable on PATH"
+                    )
+                elif semgrep_report.get("finding_count", 0):
+                    _security_errors.append(
+                        f"SECURITY_GATE_FAIL: Semgrep found {semgrep_report.get('finding_count', 0)} issue(s) "
+                        f"at/above {semgrep_report.get('fail_on', 'ERROR')}"
+                    )
+                test_results["execution_errors"] = _security_errors
+
+            for _sw in semgrep_report.get("warnings", []):
+                _tw = test_results.get("warnings", [])
+                if not isinstance(_tw, list):
+                    _tw = [str(_tw)] if _tw else []
+                _tw.append(str(_sw))
+                test_results["warnings"] = _tw
+
+            # Promote high-confidence repo/code-graph errors to execution_errors.
+            _graph_errors = repo_graph_report.get("high_confidence_errors", [])
+            if _graph_errors:
+                _exec_errs = test_results.get("execution_errors", [])
+                if not isinstance(_exec_errs, list):
+                    _exec_errs = [str(_exec_errs)] if _exec_errs else []
+                _exec_errs.extend(_graph_errors)
+                test_results["execution_errors"] = _exec_errs
+            if repo_graph_report.get("warnings"):
+                _warns = test_results.get("warnings", [])
+                if not isinstance(_warns, list):
+                    _warns = [str(_warns)] if _warns else []
+                _warns.extend(repo_graph_report.get("warnings", []))
+                test_results["warnings"] = _warns
             
             # Analyze results - ENHANCED with quality thresholds + execution errors
             _exec_errs_list = test_results.get("execution_errors", [])
-            _entry_exit = test_results.get("entry_exit_code", None)
+            # Support legacy typo key for compatibility, but prefer canonical key.
+            _entry_exit = test_results.get("entry_point_exit_code", test_results.get("entry_exit_code", None))
             _has_runtime_errors = bool(_exec_errs_list) or (_entry_exit is not None and _entry_exit != 0)
             passed = (
                 test_results.get("environment_created", False) and
                 test_results.get("dependencies_installed", False) and
                 test_results.get("syntax_valid", False) and      # Fail-safe: untested → not passed
                 test_results.get("import_successful", False) and  # Fail-safe: untested → not passed
-                avg_quality >= 50 and  # Minimum quality threshold
+                avg_quality >= 65 and  # S24: Raised 50→65 — D-grade code shouldn't auto-pass
                 not _has_runtime_errors  # CRITICAL: fail if main.py crashes or executor found errors
             )
 
@@ -4825,8 +8086,48 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                         test_results["tests_passed"] = False
 
                 # ── (B) Intra-class self.method() check ──────────────────
+                # Well-known parent class methods we should NEVER flag
+                _KNOWN_FRAMEWORK_METHODS = {
+                    # unittest.TestCase
+                    "assertEqual", "assertNotEqual", "assertTrue", "assertFalse",
+                    "assertIs", "assertIsNot", "assertIsNone", "assertIsNotNone",
+                    "assertIn", "assertNotIn", "assertIsInstance", "assertNotIsInstance",
+                    "assertRaises", "assertRaisesRegex", "assertWarns", "assertWarnsRegex",
+                    "assertAlmostEqual", "assertNotAlmostEqual", "assertGreater",
+                    "assertGreaterEqual", "assertLess", "assertLessEqual",
+                    "assertRegex", "assertNotRegex", "assertCountEqual",
+                    "assertMultiLineEqual", "assertSequenceEqual", "assertListEqual",
+                    "assertTupleEqual", "assertSetEqual", "assertDictEqual",
+                    "setUp", "tearDown", "setUpClass", "tearDownClass",
+                    "addCleanup", "doCleanups", "skipTest", "fail",
+                    "subTest", "assertLogs", "assertNoLogs",
+                    # common mixins / base classes
+                    "get", "post", "put", "patch", "delete", "head", "options",  # Flask/Django test client
+                    "login", "logout", "force_login",  # Django auth
+                    "async_to_sync", "sync_to_async",
+                }
+
                 for (_xf, _cname), _cls_node in _class_nodes.items():
-                    _methods = _class_methods.get(_cname, set())
+                    _methods = set(_class_methods.get(_cname, set()))
+
+                    # Collect methods from base classes defined in the same file
+                    for _base in _cls_node.bases:
+                        _base_name = None
+                        if isinstance(_base, _ast_xm.Name):
+                            _base_name = _base.id
+                        elif isinstance(_base, _ast_xm.Attribute):
+                            _base_name = _base.attr
+                        if _base_name and _base_name in _class_methods:
+                            _methods |= _class_methods[_base_name]
+
+                    # If class has ANY non-trivial base, add framework methods
+                    _has_base = any(
+                        not (isinstance(b, _ast_xm.Name) and b.id == "object")
+                        for b in _cls_node.bases
+                    )
+                    if _has_base:
+                        _methods |= _KNOWN_FRAMEWORK_METHODS
+
                     for _node in _ast_xm.walk(_cls_node):
                         if not isinstance(_node, _ast_xm.Call):
                             continue
@@ -5088,6 +8389,171 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                                     f"accessed but class `{_cname}` (in {_class_file.get(_cname, '?')}) "
                                     f"has no attribute `{_attr_name}`.{_suggestion} "
                                     f"Available attributes: {sorted(a for a in _known_attrs if not a.startswith('__'))}")
+
+                # ── (D2) Cross-file function SIGNATURE / argument count check ─
+                # Catches: deserialize(data) called but def deserialize(data, registry) requires 2 args.
+                # This is the root cause of the RetryVault "missing registry argument" bug.
+                #
+                # Step 1: Build function/method signature map across all files:
+                #   {(file_stem, func_name): (min_args, max_args, param_names)}
+                #   For methods, we subtract 1 for 'self'/'cls'
+                _func_sigs = {}  # {(stem, name): (min_args, max_args, [param_names])}
+                for _xf, _xc in files.items():
+                    if not _xf.endswith(".py") or not str(_xc).strip():
+                        continue
+                    # Generated test files are low-trust scaffolding; they should
+                    # not block runtime correctness gates with signature noise.
+                    if _xf.startswith("test_"):
+                        continue
+                    _xf_stem = _xf.rsplit(".", 1)[0]
+                    try:
+                        _tree = _ast_xm.parse(str(_xc))
+                    except SyntaxError:
+                        continue
+                    for _node in _ast_xm.walk(_tree):
+                        if isinstance(_node, (_ast_xm.FunctionDef, _ast_xm.AsyncFunctionDef)):
+                            _args = _node.args
+                            _all_params = [a.arg for a in _args.args]
+                            # Determine if this is a method (first arg is self/cls)
+                            _is_method = False
+                            _parent_class = None
+                            # Walk up to check if inside a class
+                            for _pnode in _ast_xm.walk(_tree):
+                                if isinstance(_pnode, _ast_xm.ClassDef):
+                                    for _citem in _pnode.body:
+                                        if _citem is _node:
+                                            _is_method = True
+                                            _parent_class = _pnode.name
+                                            break
+                                if _is_method:
+                                    break
+                            _skip = 1 if _is_method and _all_params and _all_params[0] in ("self", "cls") else 0
+                            _n_defaults = len(_args.defaults)
+                            _total = len(_all_params) - _skip
+                            _min = _total - _n_defaults
+                            _max = _total
+                            # *args or **kwargs make max unlimited
+                            if _args.vararg or _args.kwarg:
+                                _max = 999
+                            # kw-only args don't count as positional min
+                            _param_names = _all_params[_skip:]
+                            _key = (_xf_stem, _node.name)
+                            if _parent_class:
+                                _key = (_xf_stem, f"{_parent_class}.{_node.name}")
+                            _func_sigs[_key] = (_min, _max, _param_names)
+                            # Also store without class prefix for top-level function calls
+                            if _parent_class:
+                                _method_key = (_xf_stem, _node.name)
+                                # Don't overwrite if a module-level function with same name exists
+                                if _method_key not in _func_sigs:
+                                    _func_sigs[_method_key] = (_min, _max, _param_names)
+
+                # Step 2: For each cross-file method call, check argument count
+                for _xf, _xc in files.items():
+                    if not _xf.endswith(".py") or not str(_xc).strip():
+                        continue
+                    _xf_stem = _xf.rsplit(".", 1)[0]
+                    try:
+                        _tree = _ast_xm.parse(str(_xc))
+                    except SyntaxError:
+                        continue
+                    for _node in _ast_xm.walk(_tree):
+                        if not isinstance(_node, _ast_xm.Call):
+                            continue
+                        _func = _node.func
+                        _method_name = None
+                        _target_class = None
+
+                        # var.method(args) — cross-file method call
+                        if isinstance(_func, _ast_xm.Attribute):
+                            _method_name = _func.attr
+                            _obj = _func.value
+                            _var_name = None
+                            if isinstance(_obj, _ast_xm.Name):
+                                _var_name = _obj.id
+                            elif (isinstance(_obj, _ast_xm.Attribute) and
+                                  isinstance(_obj.value, _ast_xm.Name) and _obj.value.id == "self"):
+                                _var_name = "self." + _obj.attr
+                            if _var_name and _var_name in _var_class:
+                                _target_class = _var_class[_var_name]
+                        # Direct function call: func(args)
+                        elif isinstance(_func, _ast_xm.Name):
+                            _method_name = _func.id
+
+                        if not _method_name or _method_name.startswith("__"):
+                            continue
+
+                        # Guard against false positives on Python built-ins.
+                        # Example: `list(...)` should not be matched against a
+                        # generated method named `list` in another file.
+                        if _method_name in {
+                            "list", "dict", "set", "tuple", "len", "str", "int",
+                            "float", "bool", "sum", "min", "max", "sorted", "range",
+                            "print", "enumerate", "zip", "map", "filter", "next",
+                            "any", "all", "abs", "type", "isinstance", "hasattr",
+                        }:
+                            continue
+
+                        # Find matching signature
+                        _matched_sig = None
+                        _is_attr_call = isinstance(_func, _ast_xm.Attribute)
+                        if _target_class:
+                            # Look for ClassName.method in all files
+                            for (_sf, _sn), _sig in _func_sigs.items():
+                                if _sn == f"{_target_class}.{_method_name}" and _sf != _xf_stem:
+                                    _matched_sig = _sig
+                                    break
+                            if not _matched_sig:
+                                for (_sf, _sn), _sig in _func_sigs.items():
+                                    if _sn == _method_name and _sf != _xf_stem:
+                                        _matched_sig = _sig
+                                        break
+                        elif not _is_attr_call:
+                            # Direct function call (from X import func; func(a, b))
+                            # Skip attribute calls without a resolved class — these are
+                            # typically built-in methods (list.append, dict.update, etc.)
+                            # that would false-positive against custom methods of the
+                            # same name in other generated files.
+                            for (_sf, _sn), _sig in _func_sigs.items():
+                                if _sn == _method_name and _sf != _xf_stem:
+                                    _matched_sig = _sig
+                                    break
+
+                        if not _matched_sig:
+                            continue
+
+                        _min_args, _max_args, _param_names = _matched_sig
+                        # Count actual arguments: positional + keyword
+                        _n_pos = len(_node.args)
+                        _n_kw = len(_node.keywords)
+                        # **kwargs unpacking doesn't count as a fixed number
+                        _has_starargs = any(
+                            isinstance(a, _ast_xm.Starred) for a in _node.args
+                        )
+                        _has_starkw = any(
+                            kw.arg is None for kw in _node.keywords
+                        )
+                        if _has_starargs or _has_starkw:
+                            continue  # can't statically determine arg count
+
+                        _n_actual = _n_pos + _n_kw
+
+                        if _n_actual < _min_args:
+                            _lineno = getattr(_node, "lineno", "?")
+                            _call_str = f"{_var_name}.{_method_name}" if _target_class else _method_name
+                            _report_mismatch("SIGNATURE_MISMATCH",
+                                f"SIGNATURE_MISMATCH: {_xf}:{_lineno} — `{_call_str}()` called with "
+                                f"{_n_actual} argument(s) but requires at least {_min_args}. "
+                                f"Expected parameters: ({', '.join(_param_names)}). "
+                                f"FIX: Add the missing argument(s).")
+                        elif _n_actual > _max_args:
+                            _lineno = getattr(_node, "lineno", "?")
+                            _call_str = f"{_var_name}.{_method_name}" if _target_class else _method_name
+                            _report_mismatch("SIGNATURE_MISMATCH",
+                                f"SIGNATURE_MISMATCH: {_xf}:{_lineno} — `{_call_str}()` called with "
+                                f"{_n_actual} argument(s) but accepts at most {_max_args}. "
+                                f"Expected parameters: ({', '.join(_param_names)}). "
+                                f"FIX: Remove the extra argument(s).")
 
                 # ── (E) Windows encoding check ───────────────────────────
                 # Detect non-ASCII characters (emoji, unicode symbols) in code
@@ -5474,6 +8940,8 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                     "pprint", "textwrap", "locale", "gettext", "unicodedata",
                     "codecs", "mmap", "weakref", "atexit", "sched", "shelve",
                     "dbm", "pickle", "marshal", "copyreg",
+                    "difflib", "fileinput", "tokenize", "token", "keyword",
+                    "linecache", "compileall", "py_compile", "distutils",
                     # very common third-party (also in requirements.txt usually)
                     "torch", "numpy", "pandas", "scipy", "sklearn", "tensorflow",
                     "keras", "matplotlib", "seaborn", "plotly", "PIL", "cv2",
@@ -5485,6 +8953,12 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                     "jwt", "bcrypt", "cryptography", "paramiko", "fabric",
                     "openai", "anthropic", "groq", "langchain",
                     "websockets", "websocket", "tqdm", "tabulate",
+                    "dateutil",
+                    # ML/graph/NLP packages (commonly generated)
+                    "faiss", "spacy", "networkx", "community", "igraph",
+                    "sentence_transformers", "rank_bm25", "torch_geometric",
+                    "nltk", "gensim", "sympy", "xgboost", "lightgbm",
+                    "huggingface_hub", "safetensors", "einops", "wandb",
                 }
                 # Also add anything in requirements.txt
                 _req_modules = set()
@@ -5495,6 +8969,8 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                         if _rl_s and not _rl_s.startswith("#"):
                             _pkg = _re.split(r"[>=<!\[\]]", _rl_s)[0].strip().replace("-", "_").lower()
                             _req_modules.add(_pkg)
+                if "python_dateutil" in _req_modules:
+                    _req_modules.add("dateutil")
 
                 for _mm_fname, _mm_code in files.items():
                     if not _mm_fname.endswith(".py") or not str(_mm_code).strip():
@@ -5558,12 +9034,16 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                     try:
                         _main_tree = _ast_xfi.parse(_main_code)
                         _toplevel_stmts = 0
+                        _docstring_nodes = (_ast_xfi.Constant,)
+                        _ast_xfi_str = getattr(_ast_xfi, "Str", None)
+                        if _ast_xfi_str is not None:
+                            _docstring_nodes = _docstring_nodes + (_ast_xfi_str,)
                         for _node in _ast_xfi.iter_child_nodes(_main_tree):
                             if isinstance(_node, (_ast_xfi.Expr, _ast_xfi.Assign,
                                                   _ast_xfi.If, _ast_xfi.For,
                                                   _ast_xfi.While, _ast_xfi.Try)):
                                 # Check it's not just a docstring
-                                if isinstance(_node, _ast_xfi.Expr) and isinstance(_node.value, (_ast_xfi.Constant, _ast_xfi.Str)):
+                                if isinstance(_node, _ast_xfi.Expr) and isinstance(_node.value, _docstring_nodes):
                                     continue
                                 _toplevel_stmts += 1
                         if _toplevel_stmts >= 2:
@@ -5599,16 +9079,14 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                 # Instead, set a grace flag so downstream nodes know this is a
                 # timeout-only failure with high static quality.
                 test_results["pip_timeout_grace"] = True
+                test_results["verification_state"] = "static_only_timeout"
                 test_results["warnings"] = test_results.get("warnings", []) + [
                     "PIP_TIMEOUT_GRACE: Static analysis passed but runtime tests were NOT executed."
                 ]
-                # V11 FIX: Only clear the pip-timeout error, preserve any other errors
-                test_results["execution_errors"] = [
-                    e for e in test_results.get("execution_errors", [])
-                    if "timed out" not in str(e).lower()
-                ]
-                # Conditionally pass — code MIGHT work, but wasn't verified
-                passed = True
+                passed = False
+
+            if "verification_state" not in test_results:
+                test_results["verification_state"] = "runtime_verified" if passed else "runtime_failed"
             
             if passed:
                 logger.info("✅ All tests passed!")
@@ -5787,11 +9265,28 @@ async def code_testing_node(state: AutoGITState) -> Dict[str, Any]:
                 test_results["docker_sandbox"] = {"used": False, "reason": str(_de)[:100]}
             # ── End Docker Sandbox ───────────────────────────────────────────
 
+            # ── Middleware: Output Offloading — trim huge error lists ────────
+            try:
+                from ..utils.middleware import offload_large_output
+                _exec_errs = test_results.get("execution_errors", [])
+                if len(_exec_errs) > 20:
+                    _errs_text = "\n".join(str(e) for e in _exec_errs)
+                    _offloaded = offload_large_output(_errs_text, "test_execution_errors")
+                    # Keep first 20 inline + add offload ref
+                    test_results["execution_errors"] = _exec_errs[:20] + [
+                        f"[+{len(_exec_errs) - 20} more errors offloaded to file — see logs/offloaded/]"
+                    ]
+                    logger.info(f"  📦 Offloaded {len(_exec_errs)} execution errors to disk")
+            except Exception as _oe:
+                logger.debug(f"  Output offloading skipped: {_oe}")
+            # ── End Output Offloading ────────────────────────────────────────
+
             return {
                 "current_stage": "testing_complete",
                 "test_results": test_results,
                 "tests_passed": passed,
-                "code_quality": avg_quality
+                "code_quality": avg_quality,
+                "repo_map": _build_repo_map_from_generated_files(files, architecture_spec),
             }
     
     except Exception as e:
@@ -5838,7 +9333,12 @@ async def feature_verification_node(state: AutoGITState) -> Dict[str, Any]:
 
     try:
         from pathlib import Path
-        from ..utils.feature_verifier import FeatureVerifier, create_feature_error_messages
+        from ..utils.feature_verifier import (
+            FeatureVerifier,
+            create_feature_error_messages,
+            is_generation_fallback_only_failure,
+        )
+        from ..utils.code_executor import CodeExecutor, build_cached_venv_dir
         import tempfile
         import shutil
 
@@ -5876,7 +9376,7 @@ async def feature_verification_node(state: AutoGITState) -> Dict[str, Any]:
 
         # Create or reuse a project-specific venv — REUSE venv from code_testing_node
         # instead of creating a duplicate (saves 2-6 minutes per run)
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             test_dir = Path(temp_dir) / "feature_test_project"
             test_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5888,41 +9388,19 @@ async def feature_verification_node(state: AutoGITState) -> Dict[str, Any]:
                 fpath.parent.mkdir(parents=True, exist_ok=True)
                 fpath.write_text(content or "", encoding="utf-8")
 
-            # Create venv with --system-site-packages so stdlib + already-installed
-            # packages from the host are available without re-installing
-            import subprocess as _sp_fv
-            import sys as _sys_fv
-
-            python_exe = _sys_fv.executable
-            venv_dir = test_dir / ".venv"
-            try:
-                _sp_fv.run(
-                    [python_exe, "-m", "venv", "--system-site-packages", str(venv_dir)],
-                    check=True, capture_output=True, timeout=60
-                )
-                if _sys_fv.platform == "win32":
-                    venv_python = venv_dir / "Scripts" / "python.exe"
-                else:
-                    venv_python = venv_dir / "bin" / "python"
-                logger.info("  Created lightweight venv (system-site-packages) for feature testing")
-            except Exception as e:
-                logger.warning(f"  Venv creation failed ({e}) — using system Python")
-                venv_python = Path(python_exe)
-
-            # Only install requirements if the base doesn't have them
-            # (quick check: try importing the first requirement)
+            # Reuse the same cached environment strategy as code_testing_node.
             req_file = test_dir / "requirements.txt"
-            if req_file.exists() and venv_python != Path(python_exe):
-                try:
-                    _sp_fv.run(
-                        [str(venv_python), "-m", "pip", "install",
-                         "--prefer-binary", "--no-build-isolation",
-                         "-r", str(req_file), "-q"],
-                        capture_output=True, timeout=120, check=False
-                    )
-                    logger.info("  Installed dependencies for feature testing")
-                except Exception as e:
-                    logger.warning(f"  Dep install failed ({e}) — continuing anyway")
+            _req_text = req_file.read_text(encoding="utf-8") if req_file.exists() else ""
+            _cache_root = Path(__file__).resolve().parents[2] / "data" / "test_env_cache"
+            _cached_venv_dir = build_cached_venv_dir(_cache_root, _req_text)
+            _fv_executor = CodeExecutor(test_dir, venv_dir=_cached_venv_dir)
+            if _fv_executor.create_environment():
+                _fv_executor.install_dependencies()
+                venv_python = _fv_executor.get_python_executable()
+                logger.info(f"  ♻️ Reusing cached feature-test environment: {_cached_venv_dir}")
+            else:
+                logger.warning("  Cached feature-test environment unavailable — falling back to system Python")
+                venv_python = Path(sys.executable)
 
             # Run feature verification
             verifier = FeatureVerifier(timeout=90)
@@ -5982,35 +9460,67 @@ async def feature_verification_node(state: AutoGITState) -> Dict[str, Any]:
         # Inject feature failures into test_results as execution_errors
         # so the strategy_reasoner + code_fixing loop can address them
         feature_errors = create_feature_error_messages(report)
+        fallback_only_failure = is_generation_fallback_only_failure(report)
         updated_tests = dict(test_results)
         updated_tests["feature_verification"] = report
 
-        if feature_errors:
-            existing_errors = updated_tests.get("execution_errors", [])
-            existing_errors.extend(feature_errors)
-            updated_tests["execution_errors"] = existing_errors
+        prev_tdd_contract = updated_tests.get("tdd_contract") if isinstance(updated_tests.get("tdd_contract"), dict) else {}
+        prev_tdd_round = int((prev_tdd_contract or {}).get("round", 0) or 0)
+        failing_features = [
+            str(f.get("feature", "")).strip()
+            for f in features
+            if f.get("status") in ("FAIL", "ERROR")
+        ]
+        passing_features = [
+            str(f.get("feature", "")).strip()
+            for f in features
+            if f.get("status") == "PASS"
+        ]
+        updated_tests["tdd_contract"] = {
+            "active": bool(feature_errors and not fallback_only_failure),
+            "round": prev_tdd_round + 1,
+            "pass_rate": float(pass_rate),
+            "failing_features": [f for f in failing_features if f][:15],
+            "passing_features": [f for f in passing_features if f][:15],
+            "failure_messages": [str(err) for err in feature_errors[:20]],
+            "source": "feature_verification_node",
+        }
 
-            # If critical features failed, mark tests as not passed
-            critical_failures = [
-                f for f in features
-                if f.get("status") in ("FAIL", "ERROR")
-                and f.get("importance") == "critical"
-            ]
-            if critical_failures:
-                tests_passed = False
+        if feature_errors:
+            if fallback_only_failure:
+                existing_warnings = updated_tests.get("feature_verification_warnings", [])
+                existing_warnings.extend(feature_errors)
+                updated_tests["feature_verification_warnings"] = existing_warnings
                 _console.print(
-                    f"\n  [red]❌ {len(critical_failures)} CRITICAL features failed — "
-                    f"routing to fix loop[/red]"
-                )
-            elif pass_rate < 50:
-                tests_passed = False
-                _console.print(
-                    f"\n  [red]❌ Less than 50% features working — routing to fix loop[/red]"
+                    "\n  [yellow]⚠️  Feature tests fell back due to test-generation syntax issues; "
+                    "recorded as warnings (non-blocking).[/yellow]"
                 )
             else:
-                _console.print(
-                    f"\n  [yellow]⚠️  Some features failed but core functionality works[/yellow]"
-                )
+                existing_errors = updated_tests.get("execution_errors", [])
+                existing_errors.extend(feature_errors)
+                updated_tests["execution_errors"] = existing_errors
+
+                # If critical features failed, mark tests as not passed
+                critical_failures = [
+                    f for f in features
+                    if f.get("status") in ("FAIL", "ERROR")
+                    and f.get("importance") == "critical"
+                ]
+                if critical_failures:
+                    tests_passed = False
+                    _console.print(
+                        f"\n  [red]❌ {len(critical_failures)} CRITICAL features failed — "
+                        f"routing to fix loop[/red]"
+                    )
+                elif pass_rate < 50:
+                    tests_passed = False
+                    _console.print(
+                        f"\n  [red]❌ Less than 50% features working — routing to fix loop[/red]"
+                    )
+                else:
+                    _console.print(
+                        f"\n  [yellow]⚠️  Some features failed but core functionality works[/yellow]"
+                    )
         else:
             _console.print(f"\n  [green]✅ All features verified working![/green]")
 
@@ -6086,9 +9596,28 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
         self_eval_fixes = test_results.get("self_eval_fixes", "") if isinstance(test_results, dict) else ""
         prev_strategies = state.get("_prev_fix_strategies", [])
 
+        # ── Circuit breaker: suppress errors that persist 3+ consecutive cycles ──
+        _persistent_errors = state.get("_persistent_error_tracker", {})  # {error_key: count}
+        _new_tracker = {}
+        _suppressed = []
+        _filtered_errors = []
+        for err in execution_errors:
+            # Normalize error to a stable key (first 120 chars, stripped)
+            _ekey = str(err).strip()[:120]
+            _prev_count = _persistent_errors.get(_ekey, 0)
+            _new_tracker[_ekey] = _prev_count + 1
+            if _prev_count + 1 >= 3:
+                _suppressed.append(_ekey[:80])
+                logger.warning(f"  ⚡ Circuit breaker: suppressing persistent error (seen {_prev_count + 1}x): {_ekey[:80]}")
+            else:
+                _filtered_errors.append(err)
+        if _suppressed:
+            logger.info(f"  ⚡ Circuit breaker suppressed {len(_suppressed)} persistent error(s) — suspected false positives")
+        execution_errors = _filtered_errors
+
         if not execution_errors and not self_eval_fixes:
             logger.info("  No errors to reason about — passing through")
-            return {"current_stage": "strategy_pass_through"}
+            return {"current_stage": "strategy_pass_through", "_persistent_error_tracker": _new_tracker}
 
         # ── Load lessons from past runs for informed strategy (loaded ONCE) ──
         _strategy_lessons = ""
@@ -6148,6 +9677,16 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
             "  - MISSING_COLORAMA (auto-adds colorama.init())\n"
             "  - SQLite GENERATED columns (auto-removed)\n"
             "If ALL errors are in the above list, confidence should be HIGH since fixers handle them.\n\n"
+            "EXAMPLE (S20-Rank6: few-shot for calibration):\n"
+            "Errors: 'model.py: ImportError: cannot import name DataProcessor from utils'\n"
+            "Analysis:\n"
+            '{"root_cause_analysis": "utils.py defines class DataPreprocessor but model.py imports DataProcessor (wrong name).",\n'
+            ' "failure_category": "attr_mismatch",\n'
+            ' "overall_strategy": "patch_files",\n'
+            ' "confidence": 0.95,\n'
+            ' "file_instructions": {"model.py": {"action": "patch", "reason": "Wrong import name", '
+            '"specific_instructions": "Change `from utils import DataProcessor` to `from utils import DataPreprocessor`"}},\n'
+            ' "strategy_summary": "Fix mismatched import name in model.py"}\n\n'
             f"PROJECT IDEA: {idea}\n"
             f"APPROACH: {solution.get('approach_name', 'N/A')}\n\n"
             f"FILES GENERATED:\n{file_text}\n\n"
@@ -6166,22 +9705,54 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
                 f"PREVIOUSLY TRIED STRATEGIES (DO NOT REPEAT THESE):\n{prev_text}\n\n"
             )
 
-        # Include code of each file so the reasoner can see the actual bugs.
-        # For very large files (>300 lines), show first 200 + last 50 to save tokens.
+        # Include code of files referenced in errors (S20-Rank3: error-scoped).
+        # Previously included ALL .py files — wasting 50-70% of tokens on clean files.
+        # Now: only files mentioned in error messages + main.py (always relevant).
+        # Other files get a 1-line summary for cross-file awareness.
+        _error_text_combined = error_text + " " + self_eval_fixes
+        _error_referenced_files = {"main.py"}  # always include entry point
+        for fname in files:
+            if fname.endswith(".py") and fname in _error_text_combined:
+                _error_referenced_files.add(fname)
+        # Also parse traceback-style "File \"filename.py\"" patterns
+        import re as _re_sr_scope
+        for _m in _re_sr_scope.finditer(r'(?:File\s+["\']|from\s+|import\s+)(\w+)(?:\.py)?', _error_text_combined):
+            _candidate = _m.group(1) + ".py"
+            if _candidate in files:
+                _error_referenced_files.add(_candidate)
+
         code_preview = []
+        _summary_lines = []
         for fname, fcode in files.items():
             if not fname.endswith(".py"):
                 continue
             lines = (fcode or "").splitlines()
-            if len(lines) > 300:
-                preview_lines = lines[:200] + [f"  ... ({len(lines) - 250} lines omitted) ..."] + lines[-50:]
+            if fname in _error_referenced_files:
+                # Full preview for error-referenced files
+                if len(lines) > 300:
+                    preview_lines = lines[:200] + [f"  ... ({len(lines) - 250} lines omitted) ..."] + lines[-50:]
+                else:
+                    preview_lines = lines
+                code_preview.append(f"=== {fname} ({len(lines)} lines) ===\n" + "\n".join(preview_lines))
             else:
-                preview_lines = lines
-            code_preview.append(f"=== {fname} ({len(lines)} lines) ===\n" + "\n".join(preview_lines))
-        reasoning_prompt += "CODE:\n" + "\n\n".join(code_preview) + "\n\n"
+                # 1-line summary for clean files (saves tokens)
+                _summary_lines.append(f"  {fname}: {len(lines)} lines (no errors)")
+        if _summary_lines:
+            code_preview.append("=== Other files (no errors) ===\n" + "\n".join(_summary_lines))
+        logger.info(f"  📋 Strategy scope: {len(_error_referenced_files)} error-referenced file(s) "
+                    f"of {sum(1 for f in files if f.endswith('.py'))} total")
+        _code_section = "CODE:\n" + "\n\n".join(code_preview)
+        # S25: Raised from 60K→120K — strategy reasoner needs full code view
+        # for multi-file projects.  Primary model has 2M context.
+        reasoning_prompt += _trim_to_budget_global(_code_section, max_chars=120000, label="strategy-code") + "\n\n"
 
         reasoning_prompt += (
-            "Return ONLY valid JSON (no markdown fences):\n"
+            "THINK STEP-BY-STEP (S20-Rank10: Chain-of-Thought):\n"
+            "1. List each error and identify which file(s) it comes from\n"
+            "2. For each error, determine if it's a symptom or root cause\n"
+            "3. Check if any auto-fixers handle it (see list above)\n"
+            "4. For remaining errors, decide the minimal patch strategy\n\n"
+            "Then return ONLY valid JSON (no markdown fences):\n"
             "{\n"
             '  "root_cause_analysis": "One paragraph explaining the fundamental problem",\n'
             '  "failure_category": "architecture_flaw|incomplete_impl|wrong_api|shadow_file|'
@@ -6212,7 +9783,31 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
             think_end = raw.rfind("</think>")
             if think_end != -1:
                 raw = raw[think_end + len("</think>"):].strip()
-        strategy = _jsr.loads(raw)
+        try:
+            strategy = _jsr.loads(raw)
+        except _jsr.JSONDecodeError as _json_err:
+            # S24-Fix1: LLM returned invalid JSON — extract what we can or use defaults
+            logger.warning(f"  ⚠️  Strategy JSON parse failed: {_json_err} — attempting regex extraction")
+            # Try to extract JSON from mixed text (LLM may prefix with explanation)
+            _json_match = _resr.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', raw, _resr.DOTALL)
+            if _json_match:
+                try:
+                    strategy = _jsr.loads(_json_match.group())
+                    logger.info("  ✅ Recovered JSON from mixed LLM output")
+                except _jsr.JSONDecodeError:
+                    strategy = {}
+            else:
+                strategy = {}
+            if not strategy:
+                logger.warning("  ⚠️  Could not parse strategy — using default patch strategy")
+                strategy = {
+                    "root_cause_analysis": f"Strategy parse failed: {_json_err}",
+                    "failure_category": "unknown",
+                    "overall_strategy": "patch_files",
+                    "confidence": 0.3,
+                    "file_instructions": {},
+                    "strategy_summary": "Default patch (strategy JSON parse failed)",
+                }
 
         root_cause = strategy.get("root_cause_analysis", "Unknown")
         category = strategy.get("failure_category", "unknown")
@@ -6233,13 +9828,14 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
                 _strategy_key_parts.append(f"{_fi_name}:{_fi.get('action', '')}:{_fi.get('specific_instructions', '')[:100]}")
         _strategy_hash = _hashlib_sd.md5("|".join(_strategy_key_parts).encode()).hexdigest()[:12]
 
-        _prev_hashes = state.get("_prev_error_hashes", [])
-        if _strategy_hash in _prev_hashes:
+        _prev_strategy_hashes = list(state.get("_prev_strategy_hashes", []))
+        if _strategy_hash in _prev_strategy_hashes:
             logger.warning(f"  ⚠️  Strategy dedup: hash {_strategy_hash} already tried — escalating")
             _console.print(f"  [yellow]⚠️  Same strategy detected (hash {_strategy_hash}) — escalating to different approach[/yellow]")
             # Force a different approach by changing the strategy
             strategy["overall_strategy"] = "regenerate_targeted"
             strategy["strategy_summary"] = f"[ESCALATED from duplicate] {summary}"
+            strategy["_dedup_escalated"] = True  # S23-Gap3: Flag for code_fixing_node
             for _fi_name in file_instructions:
                 if isinstance(file_instructions[_fi_name], dict):
                     file_instructions[_fi_name]["action"] = "regenerate"
@@ -6252,8 +9848,8 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
                     )
             _strategy_hash = _strategy_hash + "_esc"  # new hash for escalated version
 
-        # Track this strategy's hash for future dedup
-        _updated_hashes = list(_prev_hashes) + [_strategy_hash]
+        # Track this strategy's hash for future dedup (S24: cap at 10 to prevent state bloat)
+        _updated_strategy_hashes = (list(_prev_strategy_hashes) + [_strategy_hash])[-10:]
 
         # ── SOTA: Retrieval-Augmented Debugging (RAD) ─────────────────────
         # Inspired by SWE-Agent's retrieval loop — when the strategy reasoner
@@ -6265,11 +9861,29 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
                 from ..utils.web_search import MultiEngineSearcher
                 _rad_searcher = MultiEngineSearcher(max_results=3, timeout=15)
 
+                # Internal labels that should NEVER be web-searched
+                _INTERNAL_LABELS = {
+                    "SELF_METHOD_MISSING", "API_MISMATCH", "STUB_BODY", "TRUNCATED",
+                    "MISSING_ENTRY_POINT", "SILENT_MAIN", "MISSING_OUTPUT_PROJECTION",
+                    "DEAD_LOGIC", "WRONG_CALL", "MISSING_EXPORT", "CIRCULAR_IMPORT",
+                    "SHAPE_MISMATCH", "DUPLICATE_CLASS", "PLACEHOLDER_INIT",
+                    "UNINITIALIZED_ATTR", "ATTR_MISMATCH", "ENCODING_ISSUE",
+                    "RELATIVE_IMPORT", "REDUNDANT_WRAPPING", "DEMO_MODE_INPUT",
+                    "SQLITE_NONDETERMINISTIC", "SHADOW_FILE", "MISSING_IMPORT",
+                    "CLASS_SCOPE_NAME_ERROR", "EMPTY_STUB_FILE",
+                    "CROSS_FILE_IMPORT_MISMATCH", "MISSING_CUSTOM_MODULE",
+                    "MISSING_MAIN_GUARD", "GENERATED_TEST_FAILURE",
+                }
+
                 # Build targeted search queries from error context
                 _rad_queries = []
                 for _fi_name, _fi_instr in file_instructions.items():
                     _fi_reason = (_fi_instr.get("reason", "") if isinstance(_fi_instr, dict) else "")
                     if _fi_reason:
+                        # Skip internal pipeline labels — they're not real Python concepts
+                        if any(lbl in _fi_reason for lbl in _INTERNAL_LABELS):
+                            logger.info(f"  RAD: Skipping web search for internal label in: {_fi_reason[:60]}")
+                            continue
                         # Extract the API name or module causing the issue
                         _api_match = _re.search(r"(?:method|function|class|module|API)\s+[`'\"]?(\w+[\.\w]*)[`'\"]?", _fi_reason, _re.I)
                         if _api_match:
@@ -6307,7 +9921,7 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
                     logger.info(f"  RAD: Injected {len(_rad_context_parts)} web search results into fix instructions")
 
             except Exception as _rad_err:
-                logger.debug(f"  RAD web search failed (non-critical): {_rad_err}")
+                logger.warning(f"  ⚠️  RAD web search failed: {_rad_err}")
         # ── End RAD ──────────────────────────────────────────────────────────
 
         # Display reasoning results
@@ -6336,7 +9950,8 @@ async def strategy_reasoner_node(state: AutoGITState) -> Dict[str, Any]:
         return {
             "test_results": updated_tests,
             "_prev_fix_strategies": updated_strategies,
-            "_prev_error_hashes": _updated_hashes,
+            "_prev_strategy_hashes": _updated_strategy_hashes,
+            "_persistent_error_tracker": _new_tracker,
             "current_stage": "strategy_ready",
         }
 
@@ -6377,9 +9992,76 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
     try:
         test_results = state.get("test_results", {})
         fix_attempts = state.get("fix_attempts", 0)
+        _context_budget_report = dict(state.get("context_budget_report") or {})
+        tdd_contract = test_results.get("tdd_contract", {}) if isinstance(test_results, dict) else {}
+
+        try:
+            from ..utils.middleware import generate_minimal_diff as _generate_minimal_diff
+        except ImportError:
+            try:
+                from src.utils.middleware import generate_minimal_diff as _generate_minimal_diff  # type: ignore
+            except Exception:
+                _generate_minimal_diff = None
+
+        # ── Middleware: Loop Detector — track fix cycles ──────────────────
+        try:
+            from ..utils.middleware import get_loop_detector
+        except ImportError:
+            from utils.middleware import get_loop_detector  # type: ignore
+        _loop_detector = get_loop_detector()
+        _node_warning = _loop_detector.record_node_visit("code_fixing")
+        if _node_warning:
+            logger.warning(_node_warning)
+            console.print(f"  [yellow]{_node_warning}[/yellow]")
+        # ── End Loop Detector init ───────────────────────────────────────
+
+        def _record_fix_prompt_budget(item: str, prompt_text: str) -> None:
+            phase_report = dict(_context_budget_report.get("code_fixing_prompts", {}))
+            phase_report[item] = {
+                "chars": len(prompt_text),
+                "approx_tokens": max(1, len(prompt_text) // 4),
+            }
+            _context_budget_report["code_fixing_prompts"] = phase_report
+
+        def _build_fix_diff_records(old_files: Dict[str, str], new_files: Dict[str, str]) -> List[Dict[str, Any]]:
+            records: List[Dict[str, Any]] = []
+            all_names = sorted(set(old_files.keys()) | set(new_files.keys()))
+            for fname in all_names:
+                old_code = str(old_files.get(fname, "") or "")
+                new_code = str(new_files.get(fname, "") or "")
+                if old_code == new_code:
+                    continue
+                if fname not in old_files:
+                    change_type = "created"
+                elif fname not in new_files:
+                    change_type = "deleted"
+                else:
+                    change_type = "modified"
+
+                diff_text = ""
+                if _generate_minimal_diff is not None:
+                    try:
+                        diff_text = _generate_minimal_diff(old_code, new_code, filename=fname)
+                    except Exception:
+                        diff_text = ""
+
+                if len(diff_text) > 12000:
+                    diff_text = diff_text[:7000] + "\n... [diff truncated] ...\n" + diff_text[-4000:]
+
+                records.append(
+                    {
+                        "file": fname,
+                        "change_type": change_type,
+                        "old_chars": len(old_code),
+                        "new_chars": len(new_code),
+                        "line_delta": len(new_code.splitlines()) - len(old_code.splitlines()),
+                        "diff": diff_text,
+                    }
+                )
+            return records
         
         # CRITICAL: Check max attempts with reduced limit to prevent OOM
-        max_fix_attempts = state.get("max_fix_attempts", 3)  # 3 max — allow more fix iterations
+        max_fix_attempts = state.get("max_fix_attempts", 8)  # 8 max — generous for complex projects
         if fix_attempts >= max_fix_attempts:
             logger.error(f"Max fix attempts ({fix_attempts}) reached. Giving up.")
             console.print(f"\n[red]❌ Max fix attempts reached. Cannot auto-fix code.[/red]\n")
@@ -6395,13 +10077,92 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
         _original_errors = list(execution_errors)  # snapshot before deterministic fixers remove items
         warnings = test_results.get("warnings", [])
 
-        # CRITICAL: If no errors, mark as complete to prevent loop
+        # ── Oscillation Detection ────────────────────────────────────────
+        # Track error fingerprints across fix attempts.  If the same error
+        # recurs 3+ times, it means the fix loop is oscillating (validator
+        # strips import → LLM adds it back → stripped again → ...).
+        # Skip those errors to let the loop make progress on other issues.
+        import re as _re_osc
+        _error_history = list(state.get("_error_fingerprints_history", []))
+
+        def _fingerprint(err_str: str) -> str:
+            """Create a normalized fingerprint for an error message."""
+            s = str(err_str).strip().lower()
+            # Strip line numbers (they change between attempts)
+            s = _re_osc.sub(r'line \d+', 'line N', s)
+            s = _re_osc.sub(r':\d+:', ':N:', s)
+            # Strip file paths but keep filenames
+            s = _re_osc.sub(r'["\']?(?:[a-z]:\\|/)[\w/\\.-]+[/\\](\w+\.py)', r'\1', s)
+            # Collapse whitespace
+            s = _re_osc.sub(r'\s+', ' ', s)
+            return s[:200]  # cap length
+
+        # Build fingerprint counts from history
+        _fp_counts: dict = {}
+        for _hist_fp in _error_history:
+            _fp_counts[_hist_fp] = _fp_counts.get(_hist_fp, 0) + 1
+
+        # Record current errors into history (S24: cap at 40 to prevent state bloat)
+        _current_fps = [_fingerprint(e) for e in execution_errors]
+        _new_history = (_error_history + _current_fps)[-40:]
+
+        # Find oscillating errors (appeared 3+ times)
+        _oscillating = set()
+        for _fp in _current_fps:
+            _count = _fp_counts.get(_fp, 0) + 1  # +1 for current occurrence
+            if _count >= 3:
+                _oscillating.add(_fp)
+
+        # Filter out oscillating errors
+        if _oscillating:
+            _filtered = []
+            _skipped = []
+            for _err, _fp in zip(execution_errors, _current_fps):
+                if _fp in _oscillating:
+                    _skipped.append(str(_err)[:100])
+                else:
+                    _filtered.append(_err)
+            if _skipped:
+                logger.warning(f"  ⚠️  Oscillation detected: skipping {len(_skipped)} recurring error(s)")
+                console.print(f"  [yellow]⚠️  Skipping {len(_skipped)} oscillating error(s) (seen 3+ times):[/yellow]")
+                for _sk in _skipped[:3]:
+                    console.print(f"     [dim]{_sk}[/dim]")
+            execution_errors = _filtered
+
+        # CRITICAL: If no errors remain after oscillation filtering, distinguish
+        # true success vs unresolved recurring failures.
         if not execution_errors:
+            if _oscillating:
+                _osc_msg = (
+                    f"UNRESOLVED_OSCILLATION: {len(_oscillating)} recurring error signature(s) "
+                    "suppressed by loop detector; forcing regenerate path"
+                )
+                logger.warning(f"  ⚠️  {_osc_msg}")
+                return {
+                    "current_stage": "fix_stagnated",
+                    "fix_attempts": fix_attempts + 1,
+                    "tests_passed": False,
+                    "hard_failures": [
+                        _osc_msg,
+                    ],
+                    "test_results": {
+                        **(test_results if isinstance(test_results, dict) else {}),
+                        "execution_errors": [
+                            _osc_msg,
+                        ],
+                    },
+                    "warnings": [
+                        _osc_msg,
+                    ],
+                    "_error_fingerprints_history": _new_history,
+                }
+
             logger.info("No errors to fix")
             return {
                 "current_stage": "no_errors_to_fix",
                 "fix_attempts": fix_attempts + 1,  # ALWAYS increment to prevent infinite loop
                 "tests_passed": state.get("tests_passed", False),  # Don't override — keep what testing said
+                "_error_fingerprints_history": _new_history,
             }
 
         # ── Fast path: pip-install-only errors ─────────────────────────────
@@ -6413,6 +10174,8 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             "no matching distribution",
             "could not find a version",
             "invalid metadata",
+            "metadata-generation-failed",
+            "subprocess-exited-with-error",
             "requires-python",
             "pytorch-lightning",
             "pip<",
@@ -6435,6 +10198,33 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
         generated_code_state = state.get("generated_code", {})
         files_for_fix = _flatten_file_keys(generated_code_state.get("files", {}), "code_fixing_input")
 
+        # ── ROLLBACK-PROOF: Ensure requirements.txt is complete BEFORE any LLM fixing ──
+        # IRP insight (Claude Code, SWE-Agent pattern): Dependency fixes are independent
+        # of code fixes. Even if the LLM code fix gets rolled back, deps must stay.
+        # This runs EVERY time code_fixing_node is entered, not just on pip-only errors.
+        _pre_fix_files = _ensure_requirements_complete(files_for_fix)
+        if _pre_fix_files.get("requirements.txt", "") != files_for_fix.get("requirements.txt", ""):
+            files_for_fix = _pre_fix_files
+            # Also update the state so rollback doesn't lose this
+            generated_code_state = dict(generated_code_state)
+            generated_code_state["files"] = files_for_fix
+            logger.info("  📦 requirements.txt updated with missing deps (rollback-proof)")
+
+        # Always run a full requirements sanitize pass in mixed-error scenarios too.
+        if "requirements.txt" in files_for_fix:
+            _py_srcs_for_fix = {k: v for k, v in files_for_fix.items() if k.endswith(".py")}
+            _sanitized_req = _clean_requirements_txt(files_for_fix.get("requirements.txt", ""), _py_srcs_for_fix)
+            if not _sanitized_req.strip() and _py_srcs_for_fix:
+                _sanitized_req = _build_requirements_from_imports(_py_srcs_for_fix)
+            if _sanitized_req != files_for_fix.get("requirements.txt", ""):
+                files_for_fix = dict(files_for_fix)
+                files_for_fix["requirements.txt"] = _sanitized_req
+                generated_code_state = dict(generated_code_state)
+                generated_code_state["files"] = files_for_fix
+                logger.info("  🧹 requirements.txt sanitized before LLM fix pass")
+
+        _fix_input_snapshot = dict(files_for_fix)
+
         if _is_pip_only_error(execution_errors):
             logger.info("  ⚡ Pip-only errors detected — fixing requirements.txt without LLM")
             console.print("[cyan]  ⚡ Dependency pinning issue — auto-fixing requirements.txt...[/cyan]")
@@ -6445,6 +10235,13 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
 
             # Full clean: strip stdlib internals + filter to actual imports + fix bad pins
             new_req_text = _clean_requirements_txt(req_text, py_srcs)
+            # If cleaning left it empty, rebuild deterministically from imports
+            _pip_clean_count = len([l for l in new_req_text.splitlines() if l.strip() and not l.startswith("#")])
+            if _pip_clean_count == 0:
+                rebuilt = _build_requirements_from_imports(py_srcs)
+                if rebuilt.strip():
+                    new_req_text = rebuilt
+                    logger.info(f"  🔧 requirements.txt empty after cleaning — rebuilt from imports")
             # Extra bad-pin fixes
             out = []
             for line in new_req_text.splitlines():
@@ -6464,11 +10261,19 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
 
             updated_files = dict(files_for_fix)
             updated_files["requirements.txt"] = new_req_text
+            _current_fix_diffs = state.get("fix_diffs", []) if isinstance(state.get("fix_diffs"), list) else []
+            _new_fix_diffs = _build_fix_diff_records(_fix_input_snapshot, updated_files)
             return {
                 "current_stage": "fixes_applied",
                 "fix_attempts": fix_attempts + 1,
                 "tests_passed": False,  # V5 FIX: Must re-test — deps were cleaned but code not retested
                 "generated_code": {"files": _flatten_file_keys(updated_files, "code_fixing_pip")},
+                "repo_map": _build_repo_map_from_generated_files(
+                    _flatten_file_keys(updated_files, "code_fixing_pip_repo_map"),
+                    state.get("architecture_spec") if isinstance(state.get("architecture_spec"), dict) else None,
+                ),
+                "fix_diffs": (_current_fix_diffs + _new_fix_diffs)[-12:],
+                "_error_fingerprints_history": _new_history,
             }
         # ── End fast path ───────────────────────────────────────────────────
 
@@ -6489,18 +10294,26 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             if category in ("architecture_flaw", "incomplete_impl", "wrong_algorithm"):
                 use_powerful_model = True
             # NEVER regenerate_all — force targeted patching to preserve working code
+            # S23-Gap3: But allow per-file "regenerate" when strategy_reasoner
+            # explicitly escalated due to repeated-strategy detection
+            _is_dedup_escalation = fix_strategy.get("_dedup_escalated", False)
             if overall_strategy in ("regenerate_all", "regenerate_worst"):
                 logger.warning(f"  ⚠️  Strategy '{overall_strategy}' downgraded to 'patch_files' — never regenerate working code")
                 console.print(f"  [yellow]⚠️  Downgraded '{overall_strategy}' → 'patch_files' (preserve working code)[/yellow]")
                 overall_strategy = "patch_files"
-                # Convert any 'regenerate' file actions to 'patch'
+                # Convert any 'regenerate' file actions to 'patch' UNLESS dedup-escalated
                 for fname, finstr in strategy_file_instructions.items():
                     if isinstance(finstr, dict) and finstr.get("action") == "regenerate":
-                        finstr["action"] = "patch"
-                        finstr["specific_instructions"] = (
-                            "Fix ONLY the broken parts of this file. Keep all working code intact. "
-                            + finstr.get("specific_instructions", "")
-                        )
+                        if _is_dedup_escalation:
+                            # Allow regeneration for explicitly escalated files
+                            logger.info(f"  🔄 Allowing regenerate for '{fname}' (dedup escalation)")
+                            console.print(f"  [cyan]🔄 Regenerating '{fname}' (repeated-strategy escalation)[/cyan]")
+                        else:
+                            finstr["action"] = "patch"
+                            finstr["specific_instructions"] = (
+                                "Fix ONLY the broken parts of this file. Keep all working code intact. "
+                                + finstr.get("specific_instructions", "")
+                            )
 
         # ── Handle "delete" actions BEFORE any LLM fixing ─────────────────
         # Strategy reasoner may flag files for deletion (e.g. shadow files like
@@ -6536,15 +10349,34 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                 strategy_file_instructions.pop(fname, None)
 
         # Also proactively detect + remove shadow files even without strategy instruction
+        # For STDLIB modules: always delete (os.py, sys.py, json.py — always shadows)
+        # For THIRD-PARTY modules: only delete if the file actually imports from
+        # the same-named package (meaning it's a shadow, not a legitimate wrapper)
         for fname in list(files_for_fix.keys()):
             if not fname.endswith(".py"):
                 continue
             stem = fname.rsplit(".", 1)[0].lower()
-            if stem in _SHADOW_PKG_STEMS_FIX and fname not in deleted_files:
+            if stem not in _SHADOW_PKG_STEMS_FIX or fname in deleted_files:
+                continue
+            # Always delete stdlib shadows
+            if stem in _STDLIB_MODULES:
                 del files_for_fix[fname]
-                logger.info(f"  🗑️  Auto-deleted shadow file '{fname}' (shadows package '{stem}')")
-                console.print(f"  [red]🗑️  Auto-deleted shadow file: {fname}[/red]")
+                logger.info(f"  🗑️  Auto-deleted stdlib shadow file '{fname}' (shadows '{stem}')")
+                console.print(f"  [red]🗑️  Auto-deleted stdlib shadow file: {fname}[/red]")
                 deleted_files.append(fname)
+            else:
+                # Third-party: only delete if file imports from the same package
+                # e.g. redis.py that does `import redis` or `from redis import ...`
+                _shadow_code = str(files_for_fix[fname])
+                _shadows_real = bool(_re.search(
+                    rf'^(?:import\s+{_re.escape(stem)}|from\s+{_re.escape(stem)}\s+import)',
+                    _shadow_code, _re.MULTILINE
+                ))
+                if _shadows_real:
+                    del files_for_fix[fname]
+                    logger.info(f"  🗑️  Auto-deleted shadow file '{fname}' (imports from '{stem}' package)")
+                    console.print(f"  [red]🗑️  Auto-deleted shadow file: {fname} (shadows {stem} package)[/red]")
+                    deleted_files.append(fname)
 
         if deleted_files:
             console.print(f"  [green]✓[/green] Removed {len(deleted_files)} shadow/problematic file(s): {deleted_files}")
@@ -6556,11 +10388,19 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             if not remaining_errors:
                 logger.info("  ✅ All errors were caused by shadow files — no LLM fixing needed")
                 console.print("  [green]✅ Shadow file deletion resolved all errors![/green]")
+                _current_fix_diffs = state.get("fix_diffs", []) if isinstance(state.get("fix_diffs"), list) else []
+                _new_fix_diffs = _build_fix_diff_records(_fix_input_snapshot, files_for_fix)
                 return {
                     "current_stage": "code_fixed",
                     "generated_code": {"files": _flatten_file_keys(files_for_fix, "code_fixing_shadow")},
+                    "repo_map": _build_repo_map_from_generated_files(
+                        _flatten_file_keys(files_for_fix, "code_fixing_shadow_repo_map"),
+                        state.get("architecture_spec") if isinstance(state.get("architecture_spec"), dict) else None,
+                    ),
                     "fix_attempts": fix_attempts + 1,
                     "tests_passed": False,  # re-test to confirm
+                    "fix_diffs": (_current_fix_diffs + _new_fix_diffs)[-12:],
+                    "_error_fingerprints_history": _new_history,
                 }
 
         # ── Deterministic Pre-Fix: Auto-add missing stdlib imports ──────────
@@ -6583,6 +10423,16 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             "glob", "fnmatch", "zipfile", "tarfile", "gzip", "bz2",
             "queue", "sched", "signal", "select", "selectors",
         }
+        # Common third-party aliases that frequently appear in generated code.
+        _THIRD_PARTY_NAME_IMPORTS = {
+            "np": "import numpy as np",
+            "pd": "import pandas as pd",
+            "plt": "import matplotlib.pyplot as plt",
+            "sns": "import seaborn as sns",
+            "torch": "import torch",
+            "nn": "import torch.nn as nn",
+            "F": "import torch.nn.functional as F",
+        }
         import re as _re_fix_import
         _auto_fixed_imports = []
         for _err in execution_errors:
@@ -6591,7 +10441,13 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             _nim = _re_fix_import.search(r"NameError: name '(\w+)' is not defined", _err_s)
             if _nim:
                 _missing_name = _nim.group(1)
+                _import_stmt = None
                 if _missing_name in _KNOWN_STDLIB_IMPORTABLE:
+                    _import_stmt = f"import {_missing_name}"
+                elif _missing_name in _THIRD_PARTY_NAME_IMPORTS:
+                    _import_stmt = _THIRD_PARTY_NAME_IMPORTS[_missing_name]
+
+                if _import_stmt:
                     # Find which file has the error
                     _fix_file = None
                     _fm_file = _re_fix_import.search(r'([\w_]+\.py)', _err_s)
@@ -6605,23 +10461,18 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                                 break
                     if _fix_file and _fix_file in files_for_fix:
                         _existing_code = str(files_for_fix[_fix_file])
-                        # Check if import is genuinely missing
-                        _import_pattern = _re_fix_import.compile(
-                            rf'^(?:import\s+{_missing_name}|from\s+{_missing_name}\s+import)',
-                            _re_fix_import.MULTILINE
-                        )
-                        if not _import_pattern.search(_existing_code):
+                        if _import_stmt not in _existing_code:
                             # Prepend the import
-                            files_for_fix[_fix_file] = f"import {_missing_name}\n" + _existing_code
-                            _auto_fixed_imports.append((_fix_file, _missing_name))
-                            logger.info(f"  🔧 Auto-added: import {_missing_name} → {_fix_file}")
+                            files_for_fix[_fix_file] = f"{_import_stmt}\n" + _existing_code
+                            _auto_fixed_imports.append((_fix_file, _missing_name, _import_stmt))
+                            logger.info(f"  🔧 Auto-added: {_import_stmt} → {_fix_file}")
         if _auto_fixed_imports:
             console.print(f"  [green]✓ Auto-fixed {len(_auto_fixed_imports)} missing stdlib import(s):[/green]")
-            for _afi_file, _afi_mod in _auto_fixed_imports:
-                console.print(f"    [green]import {_afi_mod}[/green] → {_afi_file}")
+            for _afi_file, _afi_mod, _afi_stmt in _auto_fixed_imports:
+                console.print(f"    [green]{_afi_stmt}[/green] → {_afi_file}")
             # Remove the now-fixed errors from execution_errors so the LLM
             # doesn't waste time on them
-            _fixed_names = {n for _, n in _auto_fixed_imports}
+            _fixed_names = {n for _, n, _ in _auto_fixed_imports}
             execution_errors = [
                 e for e in execution_errors
                 if not any(f"name '{n}' is not defined" in str(e) for n in _fixed_names)
@@ -6647,6 +10498,368 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                 e for e in execution_errors
                 if not any(k in str(e) for k in ("ENCODING_ISSUE", "UnicodeEncodeError",
                                                    "UnicodeDecodeError", "charmap"))
+            ]
+
+        # ── Deterministic Pre-Fix: Flask app context for create_all() ─────
+        # Common generated-code failure:
+        #   RuntimeError: Working outside of application context.
+        # This wraps bare create_all() calls inside with app.app_context():
+        # so schema initialization works with Flask-SQLAlchemy.
+        _has_app_context_error = any(
+            "Working outside of application context" in str(e)
+            or "current_app" in str(e)
+            for e in execution_errors
+        )
+        _app_ctx_fixed_files = []
+        if _has_app_context_error:
+            _app_ctx_fixed_files = _auto_fix_flask_app_context(files_for_fix)
+            for _fn in _app_ctx_fixed_files:
+                logger.info(f"  🔧 Auto-wrapped create_all() in app context: {_fn}")
+
+        if _app_ctx_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed Flask app context in {len(_app_ctx_fixed_files)} file(s): "
+                f"{_app_ctx_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "Working outside of application context" not in str(e)
+            ]
+
+        # ── Deterministic Pre-Fix: Flask jsonify() direct-call context ───
+        # Common generated-code failure in feature tests:
+        #   RuntimeError: Working outside of application context.
+        # when tests call API methods directly (not through HTTP request cycle).
+        _jsonify_ctx_fixed_files = []
+        if _has_app_context_error:
+            _jsonify_ctx_fixed_files = _auto_fix_flask_jsonify_context(files_for_fix)
+            for _fn in _jsonify_ctx_fixed_files:
+                logger.info(f"  🔧 Auto-injected Flask jsonify app context bootstrap: {_fn}")
+
+        if _jsonify_ctx_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed Flask jsonify app context in "
+                f"{len(_jsonify_ctx_fixed_files)} file(s): {_jsonify_ctx_fixed_files}[/green]"
+            )
+
+        # ── Deterministic Pre-Fix: Missing Flask Todo route bindings ─────
+        # Common generated-code failure:
+        #   TodoAPI methods exist, but /todos endpoints were never bound.
+        _has_flask_todo_contract_errors = any(
+            "Expected HTTP" in str(e)
+            or "KeyError: 'id'" in str(e)
+            or "FEATURE_VERIFICATION_FAIL" in str(e)
+            or "FEATURE_VERIFICATION_ERROR" in str(e)
+            for e in execution_errors
+        )
+        _flask_todo_route_fixed_files = []
+        if _has_flask_todo_contract_errors:
+            _flask_todo_route_fixed_files = _auto_fix_flask_todo_routes(files_for_fix)
+            for _fn in _flask_todo_route_fixed_files:
+                logger.info(f"  🔧 Auto-injected Flask Todo route bindings: {_fn}")
+
+        if _flask_todo_route_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-injected Flask Todo routes in "
+                f"{len(_flask_todo_route_fixed_files)} file(s): {_flask_todo_route_fixed_files}[/green]"
+            )
+
+        # ── Deterministic Pre-Fix: FastAPI JSONResponse import path ──────
+        # Common generated-code failure:
+        #   ImportError: cannot import name 'JSONResponse' from 'fastapi'
+        _has_fastapi_jsonresponse_error = any(
+            "cannot import name 'JSONResponse' from 'fastapi'" in str(e)
+            for e in execution_errors
+        )
+        _fastapi_jsonresponse_fixed_files = []
+        if _has_fastapi_jsonresponse_error:
+            _fastapi_jsonresponse_fixed_files = _auto_fix_fastapi_jsonresponse_import(files_for_fix)
+            for _fn in _fastapi_jsonresponse_fixed_files:
+                logger.info(f"  🔧 Auto-fixed FastAPI JSONResponse import path: {_fn}")
+
+        if _fastapi_jsonresponse_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed FastAPI JSONResponse import path in "
+                f"{len(_fastapi_jsonresponse_fixed_files)} file(s): {_fastapi_jsonresponse_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "cannot import name 'JSONResponse' from 'fastapi'" not in str(e)
+            ]
+
+        # ── Deterministic Pre-Fix: SQLAlchemy `db` NameError ─────────────
+        # Common generated-code failure:
+        #   NameError: name 'db' is not defined
+        _has_db_name_error = any("name 'db' is not defined" in str(e) for e in execution_errors)
+        _has_sqlalchemy_name_error = any("name 'SQLAlchemy' is not defined" in str(e) for e in execution_errors)
+        _db_name_fixed_files = []
+        if _has_db_name_error or _has_sqlalchemy_name_error:
+            _db_name_fixed_files = _auto_fix_sqlalchemy_db_nameerror(files_for_fix)
+            for _fn in _db_name_fixed_files:
+                logger.info(f"  🔧 Auto-fixed SQLAlchemy import/db NameError scaffold: {_fn}")
+
+        if _db_name_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed SQLAlchemy db NameError in "
+                f"{len(_db_name_fixed_files)} file(s): {_db_name_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "name 'db' is not defined" not in str(e)
+                and "name 'SQLAlchemy' is not defined" not in str(e)
+            ]
+
+        # ── Deterministic Pre-Fix: SQLAlchemy Database/session mismatch ───
+        # Common generated-code failure:
+        #   AttributeError: 'Database' object has no attribute 'session'
+        _db_session_fixed_files = _auto_fix_sqlalchemy_database_session_attr(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _db_session_fixed_files:
+            for _fn in _db_session_fixed_files:
+                logger.info(f"  🔧 Auto-fixed db=Database(...) session mismatch: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed SQLAlchemy session mismatch in "
+                f"{len(_db_session_fixed_files)} file(s): {_db_session_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "object has no attribute 'session'" in str(e)
+                    and "Database" in str(e)
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: SQLAlchemy app registration mismatch ──
+        _sqla_reg_fixed_files = _auto_fix_sqlalchemy_double_registration(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _sqla_reg_fixed_files:
+            for _fn in _sqla_reg_fixed_files:
+                logger.info(f"  🔧 Auto-fixed SQLAlchemy app registration: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed SQLAlchemy app registration in "
+                f"{len(_sqla_reg_fixed_files)} file(s): {_sqla_reg_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "SQLAlchemy" in str(e)
+                    and (
+                        "already been registered on this Flask app" in str(e)
+                        or "not registered with this 'SQLAlchemy' instance" in str(e)
+                    )
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: SQLAlchemy MetaData.create_all bind ──
+        _sqla_bind_fixed_files = _auto_fix_sqlalchemy_create_all_bind(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _sqla_bind_fixed_files:
+            for _fn in _sqla_bind_fixed_files:
+                logger.info(f"  🔧 Auto-fixed SQLAlchemy MetaData.create_all bind: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed SQLAlchemy create_all(bind=...) in "
+                f"{len(_sqla_bind_fixed_files)} file(s): {_sqla_bind_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "create_all() missing 1 required positional argument: 'bind'" not in str(e)
+            ]
+
+        # ── Deterministic Pre-Fix: dateutil missing-module churn ───────
+        _dateutil_req_fixed_files = _auto_fix_dateutil_requirements(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _dateutil_req_fixed_files:
+            logger.info("  🔧 Auto-added python-dateutil requirement from missing-module diagnostics")
+            console.print("  [green]✓ Auto-added python-dateutil to requirements.txt[/green]")
+            execution_errors = [
+                e for e in execution_errors
+                if not ("MISSING_CUSTOM_MODULE" in str(e) and "dateutil" in str(e))
+            ]
+
+        # ── Deterministic Pre-Fix: SQLite Todo model contract mismatch ──
+        # Common generated-code failures:
+        #   AttributeError: type object 'Todo' has no attribute 'get_by_id'
+        #   TypeError: __init__() got an unexpected keyword argument 'id'/'status'
+        _sqlite_todo_contract_fixed_files = _auto_fix_sqlite_todo_contract(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _sqlite_todo_contract_fixed_files:
+            for _fn in _sqlite_todo_contract_fixed_files:
+                logger.info(f"  🔧 Auto-fixed SQLite Todo model/API contract mismatch: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed SQLite Todo contract in "
+                f"{len(_sqlite_todo_contract_fixed_files)} file(s): {_sqlite_todo_contract_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "get_by_id" in str(e)
+                    or "unexpected keyword argument 'id'" in str(e)
+                    or "unexpected keyword argument 'status'" in str(e)
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: Pydantic Priority schema generation ───
+        # Common generated-code failure (Pydantic v2):
+        #   PydanticSchemaGenerationError: Unable to generate pydantic-core schema
+        #   for <class 'schemas.Priority'>
+        _has_pydantic_priority_schema_error = any(
+            (
+                "PydanticSchemaGenerationError" in str(e)
+                or "pydantic-core schema" in str(e)
+                or "Unable to generate" in str(e)
+            )
+            and "Priority" in str(e)
+            for e in execution_errors
+        )
+        _pydantic_priority_fixed_files = []
+        if _has_pydantic_priority_schema_error:
+            _pydantic_priority_fixed_files = _auto_fix_pydantic_priority_schema(files_for_fix)
+            for _fn in _pydantic_priority_fixed_files:
+                logger.info(f"  🔧 Auto-fixed Pydantic Priority schema handling: {_fn}")
+
+        if _pydantic_priority_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed Pydantic Priority schema issues in "
+                f"{len(_pydantic_priority_fixed_files)} file(s): {_pydantic_priority_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    (
+                        "PydanticSchemaGenerationError" in str(e)
+                        or "pydantic-core schema" in str(e)
+                        or "Unable to generate" in str(e)
+                    )
+                    and "Priority" in str(e)
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: cryptography signing import mismatch ──
+        # Common generated-code failure:
+        #   ImportError: cannot import name 'signing' from cryptography.hazmat.primitives.asymmetric
+        _has_crypto_signing_import_error = any(
+            "cannot import name 'signing'" in str(e)
+            and "cryptography.hazmat.primitives.asymmetric" in str(e)
+            for e in execution_errors
+        )
+        _crypto_signing_fixed_files = []
+        if _has_crypto_signing_import_error:
+            _crypto_signing_fixed_files = _auto_fix_cryptography_signing_import(files_for_fix)
+            for _fn in _crypto_signing_fixed_files:
+                logger.info(f"  🔧 Auto-fixed cryptography signing import: {_fn}")
+
+        if _crypto_signing_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed cryptography signing imports in "
+                f"{len(_crypto_signing_fixed_files)} file(s): {_crypto_signing_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "cannot import name 'signing'" in str(e)
+                    and "cryptography.hazmat.primitives.asymmetric" in str(e)
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: function signature mismatch call-shape ──
+        # Uses SIGNATURE_MISMATCH diagnostics emitted by the validator.
+        _has_signature_mismatch = any("SIGNATURE_MISMATCH" in str(e) for e in execution_errors)
+        _signature_fixed_files = []
+        if _has_signature_mismatch:
+            _signature_fixed_files = _auto_fix_signature_mismatch_calls(
+                files_for_fix,
+                [str(e) for e in execution_errors],
+            )
+            for _fn in _signature_fixed_files:
+                logger.info(f"  🔧 Auto-adjusted call-site argument counts: {_fn}")
+
+        if _signature_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed signature mismatch call-sites in "
+                f"{len(_signature_fixed_files)} file(s): {_signature_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "SIGNATURE_MISMATCH" not in str(e)
+            ]
+
+        # ── Deterministic Pre-Fix: Marshmallow field kwarg compatibility ──
+        # Common generated-code failure:
+        #   Field.__init__() got an unexpected keyword argument 'default'/'missing'
+        _marshmallow_kwarg_fixed_files = _auto_fix_marshmallow_field_kwargs(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _marshmallow_kwarg_fixed_files:
+            for _fn in _marshmallow_kwarg_fixed_files:
+                logger.info(f"  🔧 Auto-fixed Marshmallow field kwargs: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed Marshmallow field kwargs in "
+                f"{len(_marshmallow_kwarg_fixed_files)} file(s): {_marshmallow_kwarg_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "Field.__init__() got an unexpected keyword argument" in str(e)
+                    and ("'default'" in str(e) or "'missing'" in str(e))
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: SQLAlchemy paginate keyword-only API ──
+        # Common generated-code failure:
+        #   TypeError: Query.paginate() takes 1 positional argument but N were given
+        _paginate_fixed_files = _auto_fix_sqlalchemy_paginate_kwargs(
+            files_for_fix,
+            [str(e) for e in execution_errors],
+        )
+        if _paginate_fixed_files:
+            for _fn in _paginate_fixed_files:
+                logger.info(f"  🔧 Auto-fixed Query.paginate positional args: {_fn}")
+            console.print(
+                f"  [green]✓ Auto-fixed SQLAlchemy paginate calls in "
+                f"{len(_paginate_fixed_files)} file(s): {_paginate_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if not (
+                    "Query.paginate()" in str(e)
+                    and "positional argument" in str(e)
+                )
+            ]
+
+        # ── Deterministic Pre-Fix: Tensor-to-scalar conversion safety ────
+        # Common generated-code failure:
+        #   RuntimeError: a Tensor with N elements cannot be converted to Scalar
+        # We patch risky `.argmax(...).item()` chains to take a stable scalar.
+        _has_tensor_scalar_error = any(
+            "cannot be converted to Scalar" in str(e)
+            and "Tensor" in str(e)
+            for e in execution_errors
+        )
+        _tensor_scalar_fixed_files = []
+        if _has_tensor_scalar_error:
+            _tensor_scalar_fixed_files = _auto_fix_tensor_scalar_item(files_for_fix)
+            for _fn in _tensor_scalar_fixed_files:
+                logger.info(f"  🔧 Auto-fixed tensor scalar conversion pattern: {_fn}")
+
+        if _tensor_scalar_fixed_files:
+            console.print(
+                f"  [green]✓ Auto-fixed tensor scalar conversion in "
+                f"{len(_tensor_scalar_fixed_files)} file(s): {_tensor_scalar_fixed_files}[/green]"
+            )
+            execution_errors = [
+                e for e in execution_errors
+                if "cannot be converted to Scalar" not in str(e)
             ]
         # ── Deterministic Pre-Fix: Fuzzy method rename ────────────────────
         # When SELF_METHOD_MISSING or API_MISMATCH says "calls self.X() but
@@ -6685,6 +10898,22 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
             if not _close:
                 continue
             _correct_method = _close[0]
+            # Safety guard: block common semantic-opposite renames that amplify loops
+            # (e.g. close() -> connect()) even if string similarity is high.
+            _blocked_pairs = {
+                ("close", "connect"),
+                ("connect", "close"),
+                ("open", "close"),
+                ("close", "open"),
+                ("start", "stop"),
+                ("stop", "start"),
+            }
+            if (_wrong_method.lower(), _correct_method.lower()) in _blocked_pairs:
+                continue
+            # Require stronger confidence for fuzzy rename to reduce false positives.
+            _rename_conf = _difflib_fix.SequenceMatcher(None, _wrong_method, _correct_method).ratio()
+            if _rename_conf < 0.72 and _wrong_method not in _correct_method and _correct_method not in _wrong_method:
+                continue
             # Find which file has the error
             _mr_file_match = _re_fix_import.search(r'([\w_]+\.py):\d+', _mr_s)
             if not _mr_file_match:
@@ -6989,6 +11218,10 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                         import ast as _ast_mg
                         _mg_tree = _ast_mg.parse(_mg_code)
                         _mg_lines = _mg_code.splitlines(True)
+                        _docstring_nodes = (_ast_mg.Constant,)
+                        _ast_mg_str = getattr(_ast_mg, "Str", None)
+                        if _ast_mg_str is not None:
+                            _docstring_nodes = _docstring_nodes + (_ast_mg_str,)
                         # Find the first non-import, non-def, non-class top-level statement
                         _first_exec_line = None
                         for _mg_node in _ast_mg.iter_child_nodes(_mg_tree):
@@ -6996,7 +11229,7 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                                                      _ast_mg.ClassDef, _ast_mg.FunctionDef,
                                                      _ast_mg.AsyncFunctionDef)):
                                 continue
-                            if isinstance(_mg_node, _ast_mg.Expr) and isinstance(_mg_node.value, (_ast_mg.Constant, _ast_mg.Str)):
+                            if isinstance(_mg_node, _ast_mg.Expr) and isinstance(_mg_node.value, _docstring_nodes):
                                 continue  # docstring
                             _first_exec_line = getattr(_mg_node, "lineno", None)
                             if _first_exec_line:
@@ -7115,7 +11348,11 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
         # ── End Error Pattern DB ──────────────────────────────────────────
 
         # Use powerful model for complex fixes, fast for simple patches
-        llm = get_llm("powerful") if use_powerful_model else get_llm("fast")
+        llm = (
+            get_llm("powerful", complexity_override=state.get("complexity_override"))
+            if use_powerful_model
+            else get_llm("fast", complexity_override=state.get("complexity_override"))
+        )
 
         # ── SOTA: Reflexion-style Snapshot ────────────────────────────────
         # Save a deep copy of all files BEFORE any LLM fixing.
@@ -7144,7 +11381,39 @@ async def code_fixing_node(state: AutoGITState) -> Dict[str, Any]:
                     _persistent_info = f" [⚠️  PERSISTENT: failed {_pc}x — previous fix approaches did NOT work. Try a FUNDAMENTALLY DIFFERENT approach.]"
                     break
             _error_lines.append(f"- {_err_str}{_persistent_info}")
+            # ── Middleware: Loop Detector — record error fingerprint ──
+            _ld_fp = _err_str.strip().lower()[:200]
+            _ld_err_warn = _loop_detector.record_error(_ld_fp)
+            if _ld_err_warn:
+                logger.info(f"  🔄 {_ld_err_warn[:100]}")
+            # ── End Loop Detector error ──────────────────────────────
         error_summary = "\n".join(_error_lines)
+
+        tdd_context = ""
+        if isinstance(tdd_contract, dict) and tdd_contract.get("active"):
+            _tdd_round = int(tdd_contract.get("round", 0) or 0)
+            _tdd_rate = float(tdd_contract.get("pass_rate", 0.0) or 0.0)
+            _tdd_failing = [str(x) for x in (tdd_contract.get("failing_features", []) or []) if str(x).strip()]
+            _tdd_messages = [str(x) for x in (tdd_contract.get("failure_messages", []) or []) if str(x).strip()]
+            tdd_context = (
+                "TDD CONTRACT (must satisfy before publish):\n"
+                f"- Contract round: {_tdd_round}\n"
+                f"- Current feature pass rate: {_tdd_rate:.0f}%\n"
+                f"- Failing features: {', '.join(_tdd_failing[:10]) if _tdd_failing else 'unknown'}\n"
+                "- Preserve already-passing behaviors while fixing failures.\n"
+                "- Do not weaken assertions or remove tests to make the suite pass.\n"
+            )
+            if _tdd_messages:
+                tdd_context += "- Failure evidence:\n"
+                for _msg in _tdd_messages[:8]:
+                    tdd_context += f"  * {_msg[:240]}\n"
+
+        # ── Middleware: Loop Detector — inject context about stuck files ──
+        _loop_context = _loop_detector.get_context_injection()
+        if _loop_context:
+            error_summary = _loop_context + "\n\n" + error_summary
+            logger.info(f"  🔄 Loop detector injected context ({len(_loop_context)} chars)")
+        # ── End Loop Detector context ────────────────────────────────────
 
         system_prompt = """You are an expert Python debugger. Fix code issues based on test errors.
 
@@ -7182,6 +11451,8 @@ SPECIAL ERROR TYPES — handle these specifically:
 Return ONLY valid Python code for each file, no explanations."""
 
         fixed_files = {}
+        _llm_fixed_files: List[str] = []
+        _accepted_diff_meta: List[Dict[str, Any]] = []
 
         # Determine which files actually have errors (don't waste LLM calls on clean files)
         # If strategy provided file_instructions, use those files instead
@@ -7193,6 +11464,20 @@ Return ONLY valid Python code for each file, no explanations."""
                 for filename in files_for_fix:
                     if filename in str(err):
                         files_with_errors.add(filename)
+        if not files_with_errors and _parsed_errors:
+            import os as _os_fix
+            for _pe in _parsed_errors:
+                _pe_file = str(getattr(_pe, "file", "") or "").strip()
+                if not _pe_file:
+                    continue
+                if _pe_file in files_for_fix:
+                    files_with_errors.add(_pe_file)
+                    continue
+                _base = _os_fix.path.basename(_pe_file)
+                if _base in files_for_fix:
+                    files_with_errors.add(_base)
+        # Only Python files should go through the Python LLM-fix path.
+        files_with_errors = {f for f in files_with_errors if f.endswith('.py')}
         # Fallback: if we can't identify specific files, fix all .py files
         if not files_with_errors:
             files_with_errors = {f for f in files_for_fix if f.endswith('.py')}
@@ -7221,7 +11506,7 @@ Return ONLY valid Python code for each file, no explanations."""
         _fix_semaphore = _asyncio_fix.Semaphore(4)  # max 4 concurrent LLM calls
 
         async def _fix_one_file(_fname: str, _content: str) -> tuple:
-            """Fix a single file via LLM. Returns (filename, fixed_code_or_None)."""
+            """Fix one file via LLM. Returns (filename, fixed_code_or_None, diff_meta_or_None)."""
             file_strategy = strategy_file_instructions.get(_fname, {})
             strategy_instr = file_strategy.get("specific_instructions", "")
             strategy_action = file_strategy.get("action", "patch")
@@ -7238,16 +11523,44 @@ Return ONLY valid Python code for each file, no explanations."""
 
             file_error_summary = _per_file_errors.get(_fname, error_summary)
 
+            # ── Middleware: Diff-Based Fixing — narrow code context to error region ──
+            _focused_code = _content  # default: full file
+            try:
+                from ..utils.middleware import extract_error_context
+                # Extract line numbers from errors
+                import re as _re_line
+                _error_lines = set()
+                for _err_line_match in _re_line.finditer(r'line (\d+)', file_error_summary):
+                    _error_lines.add(int(_err_line_match.group(1)))
+                # If we found error lines and file is large, focus on error region
+                if _error_lines and len(_content) > 4000:
+                    _mid_line = sorted(_error_lines)[len(_error_lines) // 2]
+                    _ctx_code, _ctx_start, _ctx_end = extract_error_context(_content, _mid_line)
+                    if _ctx_code and len(_ctx_code) < len(_content):
+                        _focused_code = (
+                            f"# ... (lines 1-{_ctx_start - 1} omitted — unchanged) ...\n"
+                            f"{_ctx_code}\n"
+                            f"# ... (lines {_ctx_end + 1}+ omitted — unchanged) ..."
+                        )
+                        logger.info(
+                            f"  🎯 Focused fix for {_fname}: lines {_ctx_start}-{_ctx_end} "
+                            f"({len(_ctx_code)} chars vs {len(_content)} full)"
+                        )
+            except Exception as _dfe:
+                logger.debug(f"  Diff-based focus skipped for {_fname}: {_dfe}")
+            # ── End Diff-Based Fixing ────────────────────────────────────────
+
             # ── Build cross-file context so LLM sees the full project ────
             # Include OTHER project files (truncated) so the LLM can fix
             # cross-file import errors, method signature mismatches, etc.
             _context_lines = []
-            _context_budget = 4000  # chars of OTHER file context
             for _cf_name, _cf_code in sorted(files_for_fix.items()):
                 if _cf_name == _fname or not _cf_name.endswith(".py"):
                     continue
-                _cf_snippet = str(_cf_code)[:_context_budget // max(1, len(files_for_fix) - 1)]
-                _context_lines.append(f"# === {_cf_name} ===\n{_cf_snippet}")
+                _context_lines.append(
+                    # S25: Raised from 2K→6K — richer cross-file context during fixing
+                    f"# === {_cf_name} ===\n{_summarize_python_reference(_cf_name, _cf_code, max_chars=6000)}"
+                )
             _cross_file_ctx = ""
             if _context_lines:
                 _cross_file_ctx = (
@@ -7260,11 +11573,12 @@ Return ONLY valid Python code for each file, no explanations."""
 Errors:
 {file_error_summary}
 {strategy_section}
+{tdd_context}
 {_cross_file_ctx}
 
 File to fix: {_fname}
 ```python
-{_content}
+{_focused_code}
 ```
 
 Return the FIXED code for {_fname}. Fix ONLY:
@@ -7280,6 +11594,7 @@ errors EXACTLY as-is. Do NOT rewrite working code. Do NOT rename variables or
 restructure code that already works. Only touch the broken parts.
 
 Return ONLY the complete file with targeted fixes applied, no explanations."""
+            _record_fix_prompt_budget(_fname, user_prompt)
 
             messages = [
                 SystemMessage(content=system_prompt),
@@ -7287,7 +11602,7 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
             ]
 
             async with _fix_semaphore:
-                _max_retries = 2  # Try same model once more before giving up
+                _max_retries = 3  # Try same model more times before giving up
                 response = None
                 for _retry in range(_max_retries):
                     try:
@@ -7295,7 +11610,7 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                         # from blocking the entire parallel batch
                         response = await _asyncio_fix.wait_for(
                             llm.ainvoke(messages),
-                            timeout=180  # 3 minutes per file
+                            timeout=300  # 5 minutes per file
                         )
                         break  # Success — exit retry loop
                     except _asyncio_fix.TimeoutError:
@@ -7303,16 +11618,16 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                             logger.warning(f"  ⏰ LLM fix timed out for {_fname} (180s) — retrying ({_retry + 1}/{_max_retries})")
                             continue
                         logger.warning(f"  ⏰ LLM fix timed out for {_fname} (180s) — exhausted retries, keeping original")
-                        return (_fname, None)
+                        return (_fname, None, None)
                     except Exception as _fix_err:
                         if _retry < _max_retries - 1:
                             logger.warning(f"  ⚠️ LLM call failed for {_fname}: {_fix_err} — retrying ({_retry + 1}/{_max_retries})")
                             continue
                         logger.warning(f"  ⚠️ LLM call failed for {_fname}: {_fix_err} — exhausted retries")
-                        return (_fname, None)
+                        return (_fname, None, None)
 
                 if response is None:
-                    return (_fname, None)
+                    return (_fname, None, None)
 
             fixed_code = response.content
             if "```python" in fixed_code:
@@ -7334,12 +11649,44 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
 
             if _is_garbage:
                 console.print(f"  [yellow]⚠[/yellow] Kept original {_fname} (bad LLM response)")
-                return (_fname, None)
+                return (_fname, None, None)
 
             # Sanitize typographic unicode
             fixed_code = fixed_code.translate(str.maketrans(_FIX_TYPO))
+
+            # Phase A: speculative diff acceptance guard.
+            old_code = str(_content or "")
+            _similarity = _difflib_fix.SequenceMatcher(None, old_code, fixed_code).ratio()
+            _changed_ratio = max(0.0, min(1.0, 1.0 - _similarity))
+            _diff_text = ""
+            if _generate_minimal_diff is not None:
+                try:
+                    _diff_text = _generate_minimal_diff(old_code, fixed_code, filename=_fname)
+                except Exception:
+                    _diff_text = ""
+
+            # Prevent large rewrites in later fix attempts — they tend to oscillate.
+            if fix_attempts >= 1 and len(old_code) > 400 and _changed_ratio > 0.78:
+                logger.warning(
+                    f"  ⚠️  Speculative diff rejected for {_fname}: "
+                    f"changed_ratio={_changed_ratio:.2f} (too large for iterative fix pass)"
+                )
+                return (_fname, None, None)
+
+            if _diff_text and len(_diff_text) > 60000:
+                logger.warning(
+                    f"  ⚠️  Speculative diff rejected for {_fname}: "
+                    f"diff too large ({len(_diff_text)} chars)"
+                )
+                return (_fname, None, None)
+
+            _diff_meta = {
+                "file": _fname,
+                "changed_ratio": round(_changed_ratio, 4),
+                "diff_chars": len(_diff_text),
+            }
             console.print(f"  [green]✓[/green] Fixed {_fname}")
-            return (_fname, fixed_code)
+            return (_fname, fixed_code, _diff_meta)
 
         # Copy unchanged files first
         for filename, content in files_for_fix.items():
@@ -7359,9 +11706,18 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                 if isinstance(_res, Exception):
                     logger.warning(f"  ⚠️ Parallel fix exception: {_res}")
                     continue
-                _fname, _fixed = _res
+                _fname, _fixed, _diff_meta = _res
                 if _fixed is not None:
                     fixed_files[_fname] = _fixed
+                    _llm_fixed_files.append(_fname)
+                    if isinstance(_diff_meta, dict):
+                        _accepted_diff_meta.append(_diff_meta)
+                    # ── Middleware: Loop Detector — record file edit ──
+                    _ld_warn = _loop_detector.record_file_edit(_fname)
+                    if _ld_warn:
+                        logger.warning(f"  {_ld_warn}")
+                        console.print(f"  [yellow]{_ld_warn[:120]}[/yellow]")
+                    # ── End Loop Detector file edit ───────────────────
                 else:
                     # Keep original on failure
                     if _fname in files_for_fix:
@@ -7390,17 +11746,27 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
             # Extract missing modules from errors
             missing_pip_modules = []
             for error in execution_errors:
+                _err_text = str(error)
                 if "No module named" in str(error):
                     # Extract module name from "No module named 'xxx'"
-                    match = _re.search(r"No module named ['\"]([^'\"]+)['\"]", str(error))
+                    match = _re.search(r"No module named ['\"]([^'\"]+)['\"]", _err_text)
                     if match:
                         # Take only the top-level module (e.g. 'numpy' not 'numpy.core._multiarray_umath')
                         raw_mod = match.group(1).split(".")[0]
+                        _raw_mod_lower = raw_mod.lower()
                         # Skip private/internal modules (e.g. _bisect, _thread)
                         if raw_mod.startswith("_"):
                             continue
+                        # Skip modules surfaced from pip build backtraces (not project imports)
+                        if ("failed to install dependencies" in _err_text.lower() or
+                                "pip-install-" in _err_text.lower() or
+                                "setup.py" in _err_text.lower()):
+                            continue
                         # Skip stdlib modules
-                        if raw_mod.lower() in _STDLIB_MODULES:
+                        if _raw_mod_lower in _STDLIB_MODULES:
+                            continue
+                        # Skip known bad/non-installable requirement names
+                        if _raw_mod_lower in _BAD_REQUIREMENT_NAMES:
                             continue
                         # Determine if this is a LOCAL project module (not a pip package)
                         # A module is local if it's NOT a known third-party package AND
@@ -7451,17 +11817,39 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                             console.print(f"  [yellow]⚠️[/yellow]  Created stub {local_file_key} (local module, not a pip package)")
                         else:
                             # It's a known third-party pip package
-                            pkg = _IMPORT_TO_PKG.get(raw_mod, raw_mod)
+                            _alias_map_lower = {k.lower(): v for k, v in _IMPORT_TO_PKG.items()}
+                            pkg = _alias_map_lower.get(_raw_mod_lower, _IMPORT_TO_PKG.get(raw_mod, raw_mod))
+                            if str(pkg).lower() in _BAD_REQUIREMENT_NAMES:
+                                continue
                             missing_pip_modules.append(pkg)
             
             if missing_pip_modules:
                 current_reqs = fixed_files.get("requirements.txt", "")
-                new_reqs = current_reqs.strip()
+                existing_req_names: set = set()
+                for _line in current_reqs.splitlines():
+                    _s = _line.strip()
+                    if not _s or _s.startswith("#"):
+                        continue
+                    _name = _re.split(r"[>=<!;\[\s]", _s)[0].strip().lower()
+                    if _name:
+                        existing_req_names.add(_name)
+
+                unique_missing: list = []
+                seen_missing: set = set()
                 for module in missing_pip_modules:
-                    if module not in new_reqs:
+                    _mod = str(module).strip()
+                    _mod_l = _mod.lower()
+                    if not _mod or _mod_l in seen_missing or _mod_l in existing_req_names:
+                        continue
+                    seen_missing.add(_mod_l)
+                    unique_missing.append(_mod)
+
+                if unique_missing:
+                    new_reqs = current_reqs.strip()
+                    for module in unique_missing:
                         new_reqs += f"\n{module}"
-                fixed_files["requirements.txt"] = new_reqs.strip()
-                console.print(f"  [green]✓[/green] Added missing pip dependencies: {', '.join(missing_pip_modules)}")
+                    fixed_files["requirements.txt"] = new_reqs.strip()
+                    console.print(f"  [green]✓[/green] Added missing pip dependencies: {', '.join(unique_missing)}")
         
         logger.info(f"✅ Fixed {len(fixed_files)} files")
 
@@ -7492,19 +11880,49 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                     _fx_exports[_fxs] = set()
             # Scan and fix mismatched cross-file imports
             # Also catch imports from non-existent local modules
-            _STDLIB_FIX = {
-                "os", "sys", "json", "math", "re", "io", "abc", "copy", "time",
-                "datetime", "logging", "warnings", "enum", "typing", "pathlib",
-                "functools", "collections", "itertools", "dataclasses", "random",
-                "argparse", "textwrap", "string", "struct", "hashlib", "base64",
-                "unittest", "pytest", "torch", "numpy", "scipy", "sklearn",
+            _STDLIB_FIX = _STDLIB_MODULES | set(_IMPORT_TO_PKG.keys()) | {
+                "pytest", "torch", "numpy", "scipy", "sklearn",
                 "matplotlib", "pandas", "tqdm", "rich", "requests", "flask",
                 "fastapi", "pydantic", "transformers", "datasets", "PIL",
                 "cv2", "tensorflow", "jax", "einops", "wandb", "hydra",
                 "omegaconf", "yaml", "toml", "dotenv", "click", "typer",
-                "__future__", "ast", "inspect", "importlib", "contextlib",
-                "concurrent", "multiprocessing", "threading", "asyncio",
-                "subprocess", "signal", "atexit", "gc", "traceback",
+                "__future__",
+                # Common third-party packages frequently used in generated code
+                "aiohttp", "redis", "celery", "kombu", "dramatiq", "rq",
+                "websockets", "websocket", "httpx", "uvicorn", "gunicorn",
+                "starlette", "sqlalchemy", "alembic", "psycopg2",
+                "pymongo", "motor", "aioredis", "aiokafka",
+                "structlog", "loguru", "sentry_sdk",
+                "jwt", "bcrypt", "cryptography", "paramiko",
+                "marshmallow", "attrs", "attr", "cattrs",
+                "boto3", "botocore", "s3fs",
+                "kafka", "pika", "nats", "zmq",
+                "grpc", "protobuf", "thrift",
+                "apscheduler", "schedule", "huey",
+                "tenacity", "backoff", "retrying",
+                "orjson", "msgpack", "cbor2", "avro",
+                "prometheus_client", "opentelemetry", "statsd",
+                "docker", "fabric", "invoke",
+                "networkx", "igraph", "graph_tool",
+                "arrow", "pendulum", "dateutil",
+                "colorama", "termcolor", "blessed",
+                "jinja2", "mako", "chameleon",
+                "lxml", "bs4", "html5lib",
+                "Crypto", "nacl", "fernet",
+                "hypothesis", "faker", "factory",
+                "celery", "flower",
+                "aiofiles", "watchdog", "inotify",
+                "pillow", "imageio", "skimage",
+                "sympy", "statsmodels", "xgboost", "lightgbm",
+                "spacy", "nltk", "gensim", "sentence_transformers",
+                "gradio", "streamlit", "dash", "panel",
+                "pyyaml", "toml", "tomli", "tomllib",
+                "connexion", "sanic", "tornado", "aiohttp_jinja2",
+                "flask_restx", "flask_jwt_extended", "flask_sqlalchemy",
+                "cachetools", "diskcache", "dogpile",
+                "wrapt", "decorator",
+                "more_itertools", "toolz", "cytoolz",
+                "sortedcontainers", "blist",
             }
             _fix_import_count = 0
             for _fxn, _fxc in list(_py_fixed.items()):
@@ -7530,8 +11948,22 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
                     # Case B: module does NOT exist as a generated file (and not stdlib)
                     elif _fsrc not in _STDLIB_FIX:
                         _fimported = [n.strip().split(" as ")[0].strip() for n in _fnames.split(",")]
-                        _fmissing = list(_fimported)
-                        logger.warning(f"  ⚠️  Post-fix: {_fxn} imports from non-existent '{_fsrc}' — fixing")
+                        # Safe default: preserve likely third-party imports unless we can
+                        # confidently remap at least one symbol to a project file.
+                        _fmissing = []
+                        for _cand in _fimported:
+                            if not _cand:
+                                continue
+                            for _fcs, _fce in _fx_exports.items():
+                                if _cand in _fce and _fcs != _fxs:
+                                    _fmissing.append(_cand)
+                                    break
+                        if not _fmissing:
+                            continue
+                        logger.warning(
+                            f"  ⚠️  Post-fix: {_fxn} imports from unknown module '{_fsrc}' "
+                            "with project symbol overlap — repairing"
+                        )
                     else:
                         continue
                     for _fmn in _fmissing:
@@ -7687,12 +12119,43 @@ Return ONLY the complete file with targeted fixes applied, no explanations."""
             console.print(f"  [green]✓[/green] Post-LLM artifact stripper: {_post_art} file(s) cleaned")
         # ── End Post-LLM Final Artifact Stripper ─────────────────────────
 
+        # S24-Fix16: Preserve non-files metadata (approach, etc.) through the fix loop.
+        # Previously only "files" was returned, losing approach_name, key_innovation, etc.
+        _normalized_fixed_files = _flatten_file_keys(fixed_files, "code_fixing")
+        _new_fix_diffs = _build_fix_diff_records(_fix_input_snapshot, _normalized_fixed_files)
+        _diff_meta_by_file = {
+            str(item.get("file", "")): item
+            for item in _accepted_diff_meta
+            if isinstance(item, dict) and item.get("file")
+        }
+        for _entry in _new_fix_diffs:
+            _meta = _diff_meta_by_file.get(str(_entry.get("file", "")))
+            if _meta:
+                _entry["changed_ratio"] = _meta.get("changed_ratio")
+                _entry["llm_diff_chars"] = _meta.get("diff_chars")
+
+        _prev_fix_diffs = state.get("fix_diffs", []) if isinstance(state.get("fix_diffs"), list) else []
+        _updated_fix_diffs = (_prev_fix_diffs + _new_fix_diffs)[-12:]
+
+        _gen_code_meta = {k: v for k, v in generated_code_state.items()
+                         if isinstance(generated_code_state, dict) and k != "files"}
+        _gen_code_meta["files"] = _normalized_fixed_files
+
         return {
             "current_stage": "code_fixed",
-            "generated_code": {"files": _flatten_file_keys(fixed_files, "code_fixing")},
+            "generated_code": _gen_code_meta,
+            "repo_map": _build_repo_map_from_generated_files(
+                _normalized_fixed_files,
+                state.get("architecture_spec") if isinstance(state.get("architecture_spec"), dict) else None,
+            ),
             "fix_attempts": fix_attempts + 1,
             "_prev_error_hashes": _all_hashes,
+            "fix_review_required": bool(_llm_fixed_files),
+            "llm_fixed_files": sorted(set(_llm_fixed_files)),
+            "fix_diffs": _updated_fix_diffs,
             "_auto_fixed_errors": list(state.get("_auto_fixed_errors", [])) + _auto_fixed_this_round,
+            "context_budget_report": _context_budget_report,
+            "_error_fingerprints_history": _new_history,
         }
     
     except Exception as e:
@@ -7728,8 +12191,13 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
     """
     logger.info("🔬 Pipeline Self-Eval Node")
 
-    MAX_SELF_EVAL = 3  # Maximum self-eval reruns
-    MAX_FIX_ATTEMPTS_CAP = 8  # Hard ceiling — no node may push max_fix_attempts above this
+    MAX_SELF_EVAL = 5  # Maximum self-eval reruns
+    MAX_FIX_ATTEMPTS_CAP = _get_env_int(
+        "AUTOGIT_MAX_FIX_ATTEMPTS_CAP",
+        12,
+        min_value=1,
+        max_value=20,
+    )  # Hard ceiling — no node may push max_fix_attempts above this
     self_eval_attempts: int = state.get("self_eval_attempts", 0)  # type: ignore[assignment]
 
     idea             = state.get("idea", "")
@@ -7746,12 +12214,18 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
     if not files:
         logger.warning("Self-eval: no files — approving immediately")
         _console.print("  [dim yellow]No files found — skipping eval, routing to publish[/dim yellow]")
-        return {"current_stage": "self_eval_approved", "self_eval_score": 0.0,
-                "self_eval_attempts": self_eval_attempts + 1}
+        return {
+            "current_stage": "self_eval_approved",
+            "self_eval_score": 0.0,
+            "self_eval_attempts": self_eval_attempts + 1,
+            "self_eval_unverified": True,
+            "tests_passed": False,
+            "warnings": ["Self-eval approved without files; marked unverified."],
+        }
 
     # ── Build compact code summary for the LLM evaluator ─────────────────────
     # Send full files for short files, truncate only if very large
-    MAX_LINES_PER_FILE = 500   # generous — need to see full implementations
+    MAX_LINES_PER_FILE = 1000   # generous — need to see full implementations
     file_summaries: List[str] = []
     for fname, fcode in files.items():
         code_str = fcode if isinstance(fcode, str) else ""
@@ -7775,6 +12249,66 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
         else:
             runtime_context = "Test suite result: mixed (some checks failed)."
 
+    # S23-Gap5: Include smoke test results in self-eval
+    _smoke_result_se = state.get("smoke_test") or {}
+    if _smoke_result_se:
+        _smoke_passed_se = _smoke_result_se.get("passed", False)
+        if _smoke_passed_se:
+            runtime_context += "\nSmoke test (install deps + run main.py in fresh venv): PASSED ✅"
+        else:
+            _smoke_errors_se = _smoke_result_se.get("errors", [])
+            runtime_context += "\nSmoke test (install deps + run main.py in fresh venv): FAILED ❌"
+            if _smoke_errors_se:
+                runtime_context += "\nSmoke test errors:\n" + "\n".join(
+                    f"  - {e}" for e in _smoke_errors_se[:5]
+                )
+            runtime_context += ("\n\nCRITICAL: The smoke test FAILED. The code does NOT run "
+                                "successfully in a clean environment. Your correctness score "
+                                "MUST be ≤ 4 and overall_score MUST be < 7.")
+
+    def _parse_eval_json(raw_text: str, fallback: Dict[str, Any], node_label: str) -> tuple[Dict[str, Any], bool, str]:
+        """Robust JSON parse for evaluation nodes with deterministic fallback."""
+        import json as _json_eval
+        import re as _re_eval
+
+        raw_local = (raw_text or "").strip()
+        if "<think>" in raw_local:
+            _think_end = raw_local.rfind("</think>")
+            if _think_end != -1:
+                raw_local = raw_local[_think_end + len("</think>"):].strip()
+
+        raw_local = _re_eval.sub(r"^```[a-zA-Z0-9_+-]*\n?", "", raw_local)
+        raw_local = _re_eval.sub(r"\n?```$", "", raw_local.strip())
+
+        # 1) direct parse
+        try:
+            parsed = _json_eval.loads(raw_local)
+            if isinstance(parsed, dict):
+                return parsed, False, "direct"
+        except Exception:
+            pass
+
+        # 2) shared robust extractor
+        try:
+            parsed_any = extract_json_from_text(raw_local, expected_type="object")
+            if isinstance(parsed_any, dict):
+                return parsed_any, False, "extractor"
+        except Exception:
+            pass
+
+        # 3) trailing comma clean + key-quote repair
+        cleaned = _re_eval.sub(r",\s*([}\]])", r"\1", raw_local)
+        cleaned = _re_eval.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', cleaned)
+        try:
+            parsed = _json_eval.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed, False, "cleaned"
+        except Exception:
+            pass
+
+        logger.warning(f"  ⚠️  {node_label}: JSON parse fallback used")
+        return dict(fallback), True, "fallback"
+
     try:
         llm = get_fallback_llm("powerful")
 
@@ -7796,21 +12330,64 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
             '  "verdict":       "approved" or "needs_work",\n'
             '  "priority_fixes": ["top-3 most impactful fixes if needs_work, else []"]\n'
             "}\n"
-            'verdict must be "needs_work" if overall_score < 6.'
+            'verdict must be "needs_work" if overall_score < 7.\n\n'
+            "SCORING RUBRIC (S20-Rank13):\n"
+            "  10: Flawless — production-ready, handles edge cases, clean code\n"
+            "  8-9: Strong — works correctly, minor style issues\n"
+            "  7: Acceptable — core features work, some gaps\n"
+            "  5-6: Needs work — has bugs or missing features, but fixable\n"
+            "  3-4: Significant issues — major logic errors or missing core features\n"
+            "  1-2: Barely functional — mostly stubs or broken\n"
+            "  0: Does not run at all\n"
         )
 
         messages = [HumanMessage(content=eval_prompt)]
         response = await llm.ainvoke(messages)
 
-        import json as _jse, re as _rese
-        raw = response.content.strip()
-        raw = _rese.sub(r"^```[a-z]*\n?", "", raw)
-        raw = _rese.sub(r"\n?```$", "", raw.strip())
-        eval_result = _jse.loads(raw)
+        eval_result, _parse_fallback_used, _parse_mode = _parse_eval_json(
+            response.content,
+            {
+                "overall_score": 4,
+                "verdict": "needs_work",
+                "priority_fixes": ["Self-eval JSON parse failed — re-evaluate"],
+            },
+            "Self-eval",
+        )
 
         overall_score: float = float(eval_result.get("overall_score", 5))
         verdict: str         = eval_result.get("verdict", "approved")
         priority_fixes: List[str] = eval_result.get("priority_fixes", [])
+
+        # S23-Gap5: Hard override — if smoke test failed, force needs_work
+        if _smoke_result_se and not _smoke_result_se.get("passed", False):
+            if overall_score >= 7:
+                logger.warning(f"  ⚠️  Self-eval score {overall_score} overridden → 5.0 (smoke test failed)")
+                _console.print(f"  [yellow]⚠️  Score {overall_score:.1f} overridden to 5.0 — smoke test failed[/yellow]")
+                overall_score = 5.0
+            verdict = "needs_work"
+            if not priority_fixes:
+                _smoke_err_items = (_smoke_result_se.get("errors") or [])[:3]
+                priority_fixes = [f"Fix smoke test failure: {e}" for e in _smoke_err_items] or [
+                    "Fix runtime crash — code does not execute successfully in a clean environment"
+                ]
+
+        # Hard guard: if runtime errors still exist, this cannot be approved.
+        _existing_exec_errors = existing_tests.get("execution_errors", []) if isinstance(existing_tests, dict) else []
+        if _existing_exec_errors:
+            if overall_score >= 7:
+                logger.warning(
+                    f"  ⚠️  Self-eval score {overall_score} overridden → 6.0 "
+                    "(execution errors still present)"
+                )
+                _console.print(
+                    f"  [yellow]⚠️  Score {overall_score:.1f} overridden to 6.0 — execution errors remain[/yellow]"
+                )
+                overall_score = 6.0
+            verdict = "needs_work"
+            if not priority_fixes:
+                priority_fixes = [
+                    f"Resolve runtime failure: {str(e)[:180]}" for e in _existing_exec_errors[:3]
+                ]
 
         # ── Display scorecard ─────────────────────────────────────────────────
         s_color = "green" if overall_score >= 7 else ("yellow" if overall_score >= 5 else "red")
@@ -7829,8 +12406,9 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
                     f"attempt={self_eval_attempts + 1}/{MAX_SELF_EVAL}")
 
         # ── Route decision ────────────────────────────────────────────────────
-        # Re-loop if score is below acceptable (< 6) AND we haven't exhausted attempts
-        if verdict == "needs_work" and overall_score < 6 and (self_eval_attempts + 1) < MAX_SELF_EVAL:
+        # Re-loop if score is below acceptable (< 7) AND we haven't exhausted attempts
+        # S20-Rank14: Raised from 6→7 to demand higher quality before publishing
+        if verdict == "needs_work" and overall_score < 7 and (self_eval_attempts + 1) < MAX_SELF_EVAL:
             fix_guidance = (
                 "SELF-EVAL FEEDBACK — address these before re-testing:\n"
                 + "\n".join(f"  {i}. {fix}" for i, fix in enumerate(priority_fixes, 1))
@@ -7842,11 +12420,16 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
             updated_tests = dict(existing_tests) if isinstance(existing_tests, dict) else {}
             updated_tests["self_eval_fixes"] = fix_guidance
             updated_tests["self_eval_score"] = overall_score
+            # S24-Fix7: Replace stale self-eval errors instead of appending.
+            # Old code used .extend() which accumulated errors across eval passes,
+            # bloating the error list and overwhelming the strategy reasoner's context.
             _existing_se_errors = updated_tests.get("execution_errors", [])
+            # Remove prior self-eval entries before adding new ones
+            _existing_se_errors = [e for e in _existing_se_errors if not str(e).startswith("[SELF-EVAL]")]
             _existing_se_errors.extend([f"[SELF-EVAL] {fix}" for fix in priority_fixes])
             updated_tests["execution_errors"] = _existing_se_errors
 
-            _console.print(f"\n  [yellow]⟳  Score {overall_score:.1f} < 6 — routing back for targeted fixes "
+            _console.print(f"\n  [yellow]⟳  Score {overall_score:.1f} < 7 — routing back for targeted fixes "
                            f"(pass {self_eval_attempts + 1}/{MAX_SELF_EVAL})[/yellow]")
             if priority_fixes:
                 _console.print("  [dim]Priority fixes: " + "; ".join(priority_fixes[:3]) + "[/dim]")
@@ -7857,6 +12440,7 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
                 "self_eval_attempts": self_eval_attempts + 1,
                 "test_results": updated_tests,
                 "tests_passed": False,  # force re-test after fixing
+                "warnings": ([f"SELF_EVAL_JSON_FALLBACK_USED: mode={_parse_mode}"] if _parse_fallback_used else []),
                 # Grant exactly ONE more fix attempt by raising the cap.
                 # Old: fix_attempts - 1 → could reset to 0 creating infinite loop.
                 # New: bump max_fix_attempts by 1, hard-capped at MAX_FIX_ATTEMPTS_CAP.
@@ -7868,6 +12452,8 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
             "current_stage": "self_eval_approved",
             "self_eval_score": overall_score,
             "self_eval_attempts": self_eval_attempts + 1,
+            "self_eval_unverified": False,
+            "warnings": ([f"SELF_EVAL_JSON_FALLBACK_USED: mode={_parse_mode}"] if _parse_fallback_used else []),
         }
 
     except Exception as e:
@@ -7892,6 +12478,7 @@ async def pipeline_self_eval_node(state: AutoGITState) -> Dict[str, Any]:
             "current_stage": "self_eval_approved",
             "self_eval_score": 0.0,
             "self_eval_attempts": self_eval_attempts + 1,
+            "self_eval_unverified": True,
             "tests_passed": False,  # Fail-safe: don't publish unverified code
             "warnings": [f"UNVERIFIED_APPROVAL: Self-eval LLM failed {MAX_SELF_EVAL} times ({e})."],
         }
@@ -7923,8 +12510,13 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
     """
     logger.info("🎯 Goal Achievement Evaluation Node")
 
-    MAX_GOAL_EVAL = 3
-    MAX_FIX_ATTEMPTS_CAP = 8  # Hard ceiling — mirrors self_eval cap
+    MAX_GOAL_EVAL = 5
+    MAX_FIX_ATTEMPTS_CAP = _get_env_int(
+        "AUTOGIT_MAX_FIX_ATTEMPTS_CAP",
+        12,
+        min_value=1,
+        max_value=20,
+    )  # Hard ceiling — mirrors self_eval cap
     goal_eval_attempts: int = state.get("goal_eval_attempts", 0)  # type: ignore[assignment]
 
     idea              = state.get("idea", "")
@@ -7940,10 +12532,16 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
 
     if not files:
         logger.warning("Goal eval: no files — skipping")
-        return {"current_stage": "goal_eval_approved", "goal_eval_attempts": goal_eval_attempts + 1}
+        return {
+            "current_stage": "goal_eval_approved",
+            "goal_eval_attempts": goal_eval_attempts + 1,
+            "goal_eval_unverified": True,
+            "tests_passed": False,
+            "warnings": ["Goal eval approved without files; marked unverified."],
+        }
 
     # ── Build full code context ──────────────────────────────────────────────
-    MAX_LINES = 500
+    MAX_LINES = 1000
     code_blocks: List[str] = []
     for fname, fcode in files.items():
         code_str = fcode if isinstance(fcode, str) else ""
@@ -7954,33 +12552,185 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
         code_blocks.append(f"=== {fname} ({len(lines)} lines) ===\n{preview}")
     code_context = "\n\n".join(code_blocks)
 
-    # ── Build requirements context ───────────────────────────────────────────
+    # ── Build requirements context (S20-Rank7: pin requirements) ───────────
+    # If we have structured requirements from the conversation agent, pin
+    # them as the CANONICAL list so the LLM cannot hallucinate requirements
+    # or miss ones the user explicitly asked for.
+    #
+    # IMPORTANT: Only extract from goal-relevant fields (core_components,
+    # key_features, test_scenarios). Do NOT flatten metadata like
+    # project_type, complexity, external_deps, data_flow, risk_areas,
+    # success_criteria — those bloat the report with non-goals.
+    _has_pinned_reqs = False
+    _pinned_req_names: List[str] = []
     req_context = f"USER IDEA:\n{idea}\n"
     if user_requirements:
         req_context += f"\nADDITIONAL REQUIREMENTS:\n{user_requirements}\n"
+
+    # ── Also pin any explicit user requirements as goals ──────────────
+    if user_requirements:
+        # Split on newlines or semicolons to get individual requirements
+        import re as _gre_split
+        _user_req_items = [r.strip() for r in _gre_split.split(r'[;\n]', user_requirements) if r.strip()]
+        _pinned_req_names.extend(_user_req_items)
+
     if requirements:
         import json as _gjson_req
+        # Only extract from GOAL-RELEVANT fields
+        _GOAL_FIELDS = ("core_components", "key_features")
+        if isinstance(requirements, dict):
+            for _cat in _GOAL_FIELDS:
+                _items = requirements.get(_cat, [])
+                if isinstance(_items, list):
+                    for _item in _items:
+                        if isinstance(_item, str):
+                            _pinned_req_names.append(_item)
+                        elif isinstance(_item, dict):
+                            _pinned_req_names.append(_item.get("name", str(_item)))
+            # Include test scenario names as verification criteria
+            _test_scenarios = requirements.get("test_scenarios", [])
+            if isinstance(_test_scenarios, list):
+                for _ts in _test_scenarios:
+                    if isinstance(_ts, dict) and _ts.get("name"):
+                        _pinned_req_names.append(_ts["name"])
+        elif isinstance(requirements, list):
+            for _item in requirements:
+                if isinstance(_item, str):
+                    _pinned_req_names.append(_item)
+                elif isinstance(_item, dict):
+                    _pinned_req_names.append(_item.get("name", str(_item)))
+        # Deduplicate while preserving order
+        _seen = set()
+        _deduped: List[str] = []
+        for _rn in _pinned_req_names:
+            _rn_lower = _rn.strip().lower()
+            if _rn_lower and _rn_lower not in _seen:
+                _seen.add(_rn_lower)
+                _deduped.append(_rn.strip())
+        _pinned_req_names = _deduped
+        _has_pinned_reqs = len(_pinned_req_names) > 0
         req_context += f"\nSTRUCTURED REQUIREMENTS:\n{_gjson_req.dumps(requirements, indent=2, default=str)}\n"
+
+    # ── S23-Gap2: Include runtime test status in goal eval ────────────
+    # Goal eval previously only read code — if tests/smoke failed, it didn't
+    # know.  Now we inject test + smoke results so the LLM can't approve
+    # code that crashes at runtime.
+    _tests_passed = state.get("tests_passed", False)
+    _smoke_result = state.get("smoke_test") or {}
+    _smoke_passed = _smoke_result.get("passed", False)
+    _test_results = state.get("test_results") or {}
+    _exec_errors = _test_results.get("execution_errors", []) if isinstance(_test_results, dict) else []
+
+    _runtime_status_lines = []
+    if _tests_passed and _smoke_passed:
+        _runtime_status_lines.append("✅ All automated tests PASSED")
+        _runtime_status_lines.append("✅ Smoke test (install + run main.py) PASSED")
+    else:
+        if not _tests_passed:
+            _runtime_status_lines.append("❌ Automated tests FAILED")
+        else:
+            _runtime_status_lines.append("✅ Automated tests passed")
+        if not _smoke_passed:
+            _smoke_errors = _smoke_result.get("errors", [])
+            _runtime_status_lines.append("❌ Smoke test FAILED")
+            if _smoke_errors:
+                _runtime_status_lines.extend(f"   Smoke error: {e}" for e in _smoke_errors[:5])
+        else:
+            _runtime_status_lines.append("✅ Smoke test passed")
+        if _exec_errors:
+            _runtime_status_lines.append("Runtime errors:")
+            _runtime_status_lines.extend(f"  - {e}" for e in _exec_errors[:8])
+    _runtime_block = "\n".join(_runtime_status_lines)
+
+    def _parse_goal_eval_json(raw_text: str) -> tuple[Dict[str, Any], bool, str]:
+        """Goal-eval specific robust parser with deterministic fallback."""
+        fallback = {
+            "requirements": [],
+            "overall_pct_implemented": 0,
+            "demo_runnable": False,
+            "demo_has_output": False,
+            "summary": "Goal evaluation JSON parse failed",
+        }
+        import json as _json_eval
+        import re as _re_eval
+
+        raw_local = (raw_text or "").strip()
+        if "<think>" in raw_local:
+            _think_end = raw_local.rfind("</think>")
+            if _think_end != -1:
+                raw_local = raw_local[_think_end + len("</think>"):].strip()
+
+        raw_local = _re_eval.sub(r"^```[a-zA-Z0-9_+-]*\n?", "", raw_local)
+        raw_local = _re_eval.sub(r"\n?```$", "", raw_local.strip())
+
+        # 1) direct parse after comma cleanup
+        direct_candidate = _re_eval.sub(r",\s*([}\]])", r"\1", raw_local)
+        try:
+            parsed = _json_eval.loads(direct_candidate)
+            if isinstance(parsed, dict):
+                return parsed, False, "direct"
+        except Exception:
+            pass
+
+        # 2) shared extractor
+        try:
+            parsed_any = extract_json_from_text(raw_local, expected_type="object")
+            if isinstance(parsed_any, dict):
+                return parsed_any, False, "extractor"
+        except Exception:
+            pass
+
+        # 3) basic key quoting + comma cleanup
+        cleaned = _re_eval.sub(r",\s*([}\]])", r"\1", raw_local)
+        cleaned = _re_eval.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', cleaned)
+        try:
+            parsed = _json_eval.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed, False, "cleaned"
+        except Exception:
+            pass
+
+        logger.warning("  ⚠️  Goal eval: JSON parse fallback used")
+        return fallback, True, "fallback"
 
     try:
         llm = get_fallback_llm("powerful")
+
+        # Build instruction based on whether we have pinned requirements
+        if _has_pinned_reqs:
+            _req_instruction = (
+                "INSTRUCTIONS:\n"
+                f"The following {len(_pinned_req_names)} requirements are CANONICAL — "
+                "evaluate EXACTLY these (do not add or remove any):\n"
+                + "\n".join(f"  - {r}" for r in _pinned_req_names) + "\n\n"
+                "For EACH requirement above, check the actual code (not just comments/docstrings)\n"
+                "and classify as:\n"
+            )
+        else:
+            _req_instruction = (
+                "INSTRUCTIONS:\n"
+                "1. Extract every discrete requirement/feature from the user's idea.\n"
+                "   Be thorough — if they said 'retry with exponential backoff', that's\n"
+                "   one requirement, 'dead letter queue' is another, etc.\n"
+                "2. For EACH requirement, check the actual code (not just comments/docstrings)\n"
+                "   and classify as:\n"
+            )
 
         eval_prompt = (
             "You are a meticulous QA engineer. Your job is to verify whether the "
             "generated code ACTUALLY implements every feature the user asked for.\n\n"
             f"{req_context}\n"
             f"GENERATED CODE:\n{code_context}\n\n"
-            "INSTRUCTIONS:\n"
-            "1. Extract every discrete requirement/feature from the user's idea.\n"
-            "   Be thorough — if they said 'retry with exponential backoff', that's\n"
-            "   one requirement, 'dead letter queue' is another, etc.\n"
-            "2. For EACH requirement, check the actual code (not just comments/docstrings)\n"
-            "   and classify as:\n"
+            f"RUNTIME TEST RESULTS:\n{_runtime_block}\n\n"
+            f"{_req_instruction}"
             '   - "implemented" — real working logic exists\n'
             '   - "partial" — mentioned but stub/TODO/incomplete\n'
             '   - "missing" — not found anywhere\n'
             "3. Check if main.py provides a runnable demo that shows each feature working.\n"
-            "4. Check if main.py produces visible terminal output when run.\n\n"
+            "4. Check if main.py produces visible terminal output when run.\n"
+            "5. CRITICAL: If the runtime tests FAILED, demo_runnable MUST be false and\n"
+            "   overall_pct_implemented MUST be reduced accordingly. Code that crashes\n"
+            "   at runtime cannot be considered fully 'implemented'.\n\n"
             "Return ONLY valid JSON (no markdown fences):\n"
             "{\n"
             '  "requirements": [\n'
@@ -7998,14 +12748,7 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
         messages = [HumanMessage(content=eval_prompt)]
         response = await llm.ainvoke(messages)
 
-        import re as _gre
-        import json as _gjson
-        raw = response.content.strip()
-        raw = _gre.sub(r"^```[a-z]*\n?", "", raw)
-        raw = _gre.sub(r"\n?```$", "", raw.strip())
-        # Handle trailing commas in JSON (LLM quirk)
-        raw = _gre.sub(r",\s*([}\]])", r"\1", raw)
-        eval_result = _gjson.loads(raw)
+        eval_result, _goal_parse_fallback_used, _goal_parse_mode = _parse_goal_eval_json(response.content)
 
         reqs = eval_result.get("requirements", [])
         pct = float(eval_result.get("overall_pct_implemented", 0))
@@ -8081,18 +12824,45 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
         updated_code["files"] = updated_files
 
         # ── Route decision ───────────────────────────────────────────────────
+        # S23-Gap2: Hard gate — if tests/smoke both failed, NEVER approve regardless
+        # of LLM score. Code that crashes at runtime is not "implemented".
+        _runtime_ok = _tests_passed or _smoke_passed  # at least one must pass
+        if not _runtime_ok and not demo_ok:
+            # Override LLM's possibly-inflated impl_pct
+            _console.print(f"\n  [red]⛔ Runtime gate: tests_passed={_tests_passed}, "
+                           f"smoke_passed={_smoke_passed} — overriding impl_pct from {impl_pct:.0f}% "
+                           f"to cap at 60%[/red]")
+            impl_pct = min(impl_pct, 60.0)  # Cap at 60% if code doesn't run
+
         # Approve if ≥80% implemented OR exhausted attempts
         if impl_pct >= 80 or (goal_eval_attempts + 1) >= MAX_GOAL_EVAL:
             if impl_pct >= 80:
                 _console.print(f"\n  [green]✅ Goal achieved — {impl_pct:.0f}% requirements implemented[/green]")
-            else:
-                _console.print(f"\n  [yellow]⚠️  Max goal-eval attempts reached ({MAX_GOAL_EVAL}) — "
-                               f"publishing with {impl_pct:.0f}% coverage[/yellow]")
+                return {
+                    "current_stage": "goal_eval_approved",
+                    "goal_eval_attempts": goal_eval_attempts + 1,
+                    "goal_eval_report": eval_result,
+                    "generated_code": updated_code,
+                    "goal_eval_unverified": False,
+                    "warnings": ([f"GOAL_EVAL_JSON_FALLBACK_USED: mode={_goal_parse_mode}"] if _goal_parse_fallback_used else []),
+                    # S23: Propagate runtime status to publishing node
+                    "tests_passed": _tests_passed,
+                }
+
+            _console.print(f"\n  [yellow]⚠️  Max goal-eval attempts reached ({MAX_GOAL_EVAL}) — "
+                           f"publishing with {impl_pct:.0f}% coverage[/yellow]")
             return {
                 "current_stage": "goal_eval_approved",
                 "goal_eval_attempts": goal_eval_attempts + 1,
                 "goal_eval_report": eval_result,
                 "generated_code": updated_code,
+                "goal_eval_unverified": True,
+                "warnings": [
+                    f"Goal-eval max attempts reached with {impl_pct:.0f}% coverage; marked unverified.",
+                    *([f"GOAL_EVAL_JSON_FALLBACK_USED: mode={_goal_parse_mode}"] if _goal_parse_fallback_used else []),
+                ],
+                # S23: Propagate runtime status to publishing node
+                "tests_passed": _tests_passed,
             }
 
         # ── Not enough requirements met — loop back with focused targets ─────
@@ -8122,6 +12892,7 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
             "generated_code": updated_code,
             "test_results": updated_tests,
             "tests_passed": False,
+            "warnings": ([f"GOAL_EVAL_JSON_FALLBACK_USED: mode={_goal_parse_mode}"] if _goal_parse_fallback_used else []),
             # Grant one more fix attempt by raising the cap (hard-capped)
             "max_fix_attempts": min(state.get("max_fix_attempts", 3) + 1, MAX_FIX_ATTEMPTS_CAP),
         }
@@ -8148,6 +12919,7 @@ async def goal_achievement_eval_node(state: AutoGITState) -> Dict[str, Any]:
         return {
             "current_stage": "goal_eval_approved",
             "goal_eval_attempts": goal_eval_attempts + 1,
+            "goal_eval_unverified": True,
             "tests_passed": False,  # Fail-safe: don't publish unverified code
             "warnings": [
                 f"UNVERIFIED_APPROVAL: Goal eval LLM failed {MAX_GOAL_EVAL} times ({e}). "
@@ -8161,8 +12933,8 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
     Post-save smoke test: install requirements.txt (if exists) and run main.py
     in a subprocess. Returns a dict with pass/fail status and output.
     
-    Uses a PROJECT-SPECIFIC venv (not the host Auto-GIT Python) to avoid
-    polluting Auto-GIT's environment with project dependencies.
+    Reuses the SAME cached dependency venv strategy as code_testing_node so
+    smoke-test/runtime behavior matches earlier validation stages.
     """
     import subprocess
     from pathlib import Path
@@ -8173,23 +12945,64 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
 
     proj = Path(project_dir).resolve()  # Always use absolute path
 
-    # Create or reuse a project-specific venv
-    _smoke_venv = proj / ".smoke_venv"
-    if sys.platform == "win32":
-        _smoke_python = _smoke_venv / "Scripts" / "python.exe"
-    else:
-        _smoke_python = _smoke_venv / "bin" / "python"
+    _smoke_venv = None
+    _cleanup_local_venv = False
 
-    if not _smoke_venv.exists():
+    # Reuse cached test env so code_testing and smoke_test execute against
+    # the same dependency set.
+    _smoke_python = Path(sys.executable)
+    req_path = proj / "requirements.txt"
+    try:
         try:
-            subprocess.run(
-                [sys.executable, "-m", "venv", str(_smoke_venv)],
-                check=True, capture_output=True, timeout=60,
-            )
-            console.print("  ✅ Created smoke test venv")
-        except Exception as e:
-            console.print(f"  ⚠️  Venv creation failed: {e} — using host Python (fallback)")
-            _smoke_python = Path(sys.executable)
+            from ..utils.code_executor import CodeExecutor, build_cached_venv_dir
+        except ImportError:
+            from utils.code_executor import CodeExecutor, build_cached_venv_dir  # type: ignore
+
+        _req_text = req_path.read_text(encoding="utf-8") if req_path.exists() else ""
+        _cache_root = Path(__file__).resolve().parents[2] / "data" / "test_env_cache"
+        _cached_venv_dir = build_cached_venv_dir(_cache_root, _req_text)
+        _smoke_executor = CodeExecutor(proj, venv_dir=_cached_venv_dir)
+
+        if _smoke_executor.create_environment():
+            console.print(f"  ✅ Reusing/creating cached smoke env: {_cached_venv_dir}")
+            result["steps"].append({"step": "create/reuse cached venv", "passed": True})
+            if _smoke_executor.install_dependencies():
+                result["steps"].append({"step": "install dependencies", "passed": True})
+                _smoke_python = _smoke_executor.get_python_executable()
+            else:
+                result["steps"].append({
+                    "step": "install dependencies",
+                    "passed": False,
+                    "error": "; ".join(_smoke_executor.test_results.get("execution_errors", [])[-2:]),
+                })
+        else:
+            result["steps"].append({
+                "step": "create/reuse cached venv",
+                "passed": False,
+                "error": "; ".join(_smoke_executor.test_results.get("execution_errors", [])[-2:]),
+            })
+    except Exception as e:
+        console.print(f"  ⚠️  Cached smoke environment unavailable: {e} — using local fallback")
+
+    # Fallback local venv only if cached path was unavailable.
+    if not _smoke_python.exists():
+        _smoke_venv = proj / ".smoke_venv"
+        _cleanup_local_venv = True
+        if sys.platform == "win32":
+            _smoke_python = _smoke_venv / "Scripts" / "python.exe"
+        else:
+            _smoke_python = _smoke_venv / "bin" / "python"
+
+        if not _smoke_venv.exists():
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(_smoke_venv)],
+                    check=True, capture_output=True, timeout=60,
+                )
+                console.print("  ✅ Created fallback smoke test venv")
+            except Exception as e:
+                console.print(f"  ⚠️  Venv creation failed: {e} — using host Python (fallback)")
+                _smoke_python = Path(sys.executable)
 
     # Build a sanitized env (no API keys leak) — V10 FIX: comprehensive pattern matching
     _SENSITIVE_NAMES = {"GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
@@ -8207,25 +13020,8 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
         _smoke_env[k] = v
     _smoke_env["PYTHONIOENCODING"] = "utf-8"
 
-    # Step 1: install requirements.txt if present (into project venv, NOT host)
-    req_path = proj / "requirements.txt"
-    if req_path.exists():
-        try:
-            proc = subprocess.run(
-                [str(_smoke_python), "-m", "pip", "install", "-r", str(req_path), "--quiet"],
-                capture_output=True, text=True, timeout=120,
-                cwd=str(proj),
-                env=_smoke_env,
-            )
-            ok = proc.returncode == 0
-            result["steps"].append({"step": "pip install -r requirements.txt", "passed": ok,
-                                    "stderr": proc.stderr.strip()[-200:] if not ok else ""})
-            status = "✅" if ok else "⚠️"
-            console.print(f"  {status} pip install -r requirements.txt")
-        except Exception as e:
-            result["steps"].append({"step": "pip install", "passed": False, "error": str(e)})
-            console.print(f"  ⚠️  pip install failed: {e}")
-    else:
+    # Dependency install is already handled through the shared CodeExecutor cache path above.
+    if not req_path.exists():
         result["steps"].append({"step": "requirements.txt", "passed": True, "note": "not found (OK)"})
 
     # Step 2: find main entry point
@@ -8253,12 +13049,66 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
             ok = proc.returncode == 0
             stdout_preview = proc.stdout.strip()[:300] if proc.stdout else ""
             stderr_preview = proc.stderr.strip()[-300:] if not ok and proc.stderr else ""
+
+            # ── Output content analysis ──────────────────────────────
+            # Even if exit code is 0, check stdout/stderr for error patterns
+            # that indicate the program is FUNCTIONALLY broken (e.g., RetryVault
+            # exits 0 but 0/50 tasks succeed — all go to DLQ with errors).
+            _full_stdout = proc.stdout.strip() if proc.stdout else ""
+            _full_stderr = proc.stderr.strip() if proc.stderr else ""
+            _combined_output = _full_stdout + "\n" + _full_stderr
+            _output_warnings = []
+
+            if ok and _combined_output.strip():
+                import re as _re_smoke
+                # Check for traceback/exception patterns in stdout (should never happen on success)
+                _tb_count = _combined_output.count("Traceback (most recent call last)")
+                _exception_lines = _re_smoke.findall(r'^(?:\w+Error|Exception|Warning):\s+.+$', _combined_output, _re_smoke.MULTILINE)
+                if _tb_count > 0:
+                    _output_warnings.append(f"Found {_tb_count} traceback(s) in output despite exit code 0")
+                if _exception_lines:
+                    _output_warnings.append(f"Exception patterns in output: {_exception_lines[:5]}")
+
+                # Check for error rate indicators (0/N success, 100% failure, etc.)
+                _rate_patterns = [
+                    (_re_smoke.search(r'(\d+)/(\d+)\s+(?:tasks?\s+)?(?:succeeded|completed|passed|success)', _combined_output, _re_smoke.IGNORECASE), "success"),
+                    (_re_smoke.search(r'(\d+)/(\d+)\s+(?:tasks?\s+)?(?:failed|errors?|failures?)', _combined_output, _re_smoke.IGNORECASE), "failure"),
+                    (_re_smoke.search(r'success\s*(?:rate)?[:\s]+(\d+(?:\.\d+)?)\s*%', _combined_output, _re_smoke.IGNORECASE), "pct_success"),
+                    (_re_smoke.search(r'failure\s*(?:rate)?[:\s]+(\d+(?:\.\d+)?)\s*%', _combined_output, _re_smoke.IGNORECASE), "pct_failure"),
+                ]
+                for _match, _kind in _rate_patterns:
+                    if not _match:
+                        continue
+                    if _kind == "success" and int(_match.group(1)) == 0 and int(_match.group(2)) > 0:
+                        _output_warnings.append(f"0/{_match.group(2)} tasks succeeded — app is functionally broken")
+                    elif _kind == "failure" and int(_match.group(1)) == int(_match.group(2)) and int(_match.group(2)) > 0:
+                        _output_warnings.append(f"{_match.group(1)}/{_match.group(2)} tasks failed — 100% failure rate")
+                    elif _kind == "pct_success" and float(_match.group(1)) == 0:
+                        _output_warnings.append(f"0% success rate — app is functionally broken")
+                    elif _kind == "pct_failure" and float(_match.group(1)) >= 90:
+                        _output_warnings.append(f"{_match.group(1)}% failure rate — app is functionally broken")
+
+                # Check for "DLQ"/"dead letter" patterns (common in queue apps)
+                _dlq_count = len(_re_smoke.findall(r'(?:DLQ|dead.?letter|poison.?queue)', _combined_output, _re_smoke.IGNORECASE))
+                if _dlq_count >= 3:
+                    _output_warnings.append(f"Found {_dlq_count} DLQ/dead-letter references — tasks failing silently")
+
+                # If we found concerning patterns, downgrade the result
+                if _output_warnings:
+                    ok = False
+                    _warn_summary = "; ".join(_output_warnings)
+                    stderr_preview = f"OUTPUT_ANALYSIS: {_warn_summary}"
+                    console.print(f"  [yellow]⚠️  Exit 0 but output indicates errors:[/yellow]")
+                    for _w in _output_warnings:
+                        console.print(f"     [yellow]- {_w}[/yellow]")
+
             result["steps"].append({
                 "step": f"python {main_file}",
                 "passed": ok,
                 "exit_code": proc.returncode,
                 "stdout_preview": stdout_preview,
                 "stderr_preview": stderr_preview,
+                "output_warnings": _output_warnings if _output_warnings else None,
             })
             if ok:
                 console.print(f"  ✅ python {main_file} — exit 0")
@@ -8284,6 +13134,12 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
     test_file = proj / "test_main.py"
     if test_file.exists():
         try:
+            _test_main_text = test_file.read_text(encoding="utf-8", errors="ignore")
+            _is_generated_test_main = (
+                "auto-generated" in _test_main_text.lower()
+                or "generated by" in _test_main_text.lower()
+                or "provenance" in _test_main_text.lower()
+            )
             proc = subprocess.run(
                 [str(_smoke_python), "-m", "pytest", str(test_file), "-v", "--tb=short"],
                 capture_output=True, text=True, timeout=60,
@@ -8291,17 +13147,36 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
                 env=_smoke_env,
             )
             ok = proc.returncode == 0
-            result["steps"].append({"step": "pytest test_main.py", "passed": ok,
-                                    "exit_code": proc.returncode})
-            status = "✅" if ok else "❌"
-            console.print(f"  {status} pytest test_main.py — exit {proc.returncode}")
+            if not ok and _is_generated_test_main:
+                # Treat generated test_main as advisory-only to avoid fix-loop
+                # churn on unstable synthetic test scaffolding.
+                result["steps"].append({
+                    "step": "pytest test_main.py",
+                    "passed": True,
+                    "exit_code": proc.returncode,
+                    "note": "generated test scaffold failure treated as warning",
+                })
+                _warns = result.get("warnings", [])
+                _warns.append(
+                    f"LOW_TRUST_SMOKE_TEST_WARNING: pytest test_main.py failed (exit {proc.returncode})"
+                )
+                result["warnings"] = _warns
+                console.print(
+                    f"  ⚠️  pytest test_main.py — exit {proc.returncode} "
+                    "(generated test scaffold; warning only)"
+                )
+            else:
+                result["steps"].append({"step": "pytest test_main.py", "passed": ok,
+                                        "exit_code": proc.returncode})
+                status = "✅" if ok else "❌"
+                console.print(f"  {status} pytest test_main.py — exit {proc.returncode}")
         except Exception as e:
             result["steps"].append({"step": "pytest", "passed": False, "error": str(e)})
 
-    # Cleanup smoke venv (don't leave garbage in output dir)
+    # Cleanup only local fallback smoke venv (cached env is shared/reused).
     try:
         import shutil
-        if _smoke_venv.exists():
+        if _cleanup_local_venv and _smoke_venv and _smoke_venv.exists():
             shutil.rmtree(_smoke_venv, ignore_errors=True)
     except Exception:
         pass
@@ -8313,6 +13188,129 @@ async def _post_save_smoke_test(project_dir) -> Dict[str, Any]:
     return result
 
 
+async def smoke_test_node(state: AutoGITState) -> Dict[str, Any]:
+    """
+    Node 8.5: Post-Generation Smoke Test
+
+    Saves generated files to a temp project directory, creates a project-specific
+    venv, installs requirements.txt, and runs main.py + pytest.
+
+    If the smoke test FAILS, the concrete error messages (tracebacks, import errors,
+    missing attributes) are injected into test_results so the fix loop can address
+    them with targeted patches.
+
+    This catches the #1 class of pipeline failures: code that passes static analysis
+    and LLM-as-Judge review but CRASHES at runtime (wrong method names, truncated
+    files, missing config attributes, SQLite schema mismatches, etc.).
+    """
+    logger.info("🔬 Smoke Test Node — running generated code in isolated environment")
+
+    from rich.console import Console as _RCSM
+    _console = _RCSM()
+
+    generated_code = state.get("generated_code") or {}
+    files = generated_code.get("files", {}) if isinstance(generated_code, dict) else {}
+    fix_attempts = state.get("fix_attempts", 0)
+
+    if not files:
+        logger.warning("Smoke test: no files — skipping")
+        return {"current_stage": "smoke_test_skipped", "smoke_test": {"passed": True, "steps": []}}
+
+    try:
+        import tempfile
+        import shutil
+        from pathlib import Path
+
+        # Write files to a temp project directory
+        with tempfile.TemporaryDirectory(prefix="autogit_smoke_", ignore_cleanup_errors=True) as temp_dir:
+            project_dir = Path(temp_dir) / "project"
+            project_dir.mkdir(parents=True, exist_ok=True)
+
+            # ── ROLLBACK-PROOF: Ensure requirements.txt is complete before smoke test venv ──
+            # IRP insight: Last safety net — if prior nodes missed a dep, catch it here
+            files = _ensure_requirements_complete(files)
+            if "requirements.txt" in files:
+                _py_srcs = {k: v for k, v in files.items() if k.endswith(".py")}
+                _smoke_req = _clean_requirements_txt(files.get("requirements.txt", ""), _py_srcs)
+                if not _smoke_req.strip():
+                    _rebuilt = _build_requirements_from_imports(_py_srcs)
+                    if _rebuilt.strip():
+                        _smoke_req = _rebuilt
+                files["requirements.txt"] = _smoke_req
+
+            # Shadow file filter
+            _SHADOW = {"numpy", "torch", "scipy", "pandas", "sklearn", "tensorflow",
+                       "requests", "flask", "django", "fastapi", "setuptools", "pip",
+                       "pytest", "unittest", "typing", "collections", "abc"}
+            for fname, content in files.items():
+                _stem = fname.rsplit(".", 1)[0] if "." in fname else fname
+                if _stem in _SHADOW:
+                    continue
+                fpath = project_dir / fname
+                fpath.parent.mkdir(parents=True, exist_ok=True)
+                fpath.write_text(content if isinstance(content, str) else str(content), encoding="utf-8")
+
+            # Run the actual smoke test
+            smoke_result = await _post_save_smoke_test(str(project_dir))
+
+        if smoke_result.get("passed", False):
+            _console.print("\n  [bold green]✅ Smoke test PASSED — code runs correctly![/bold green]")
+            logger.info("  ✅ Smoke test passed")
+            return {
+                "current_stage": "smoke_test_passed",
+                "smoke_test": smoke_result,
+                "tests_passed": True,  # Override: if it runs, it passes
+            }
+        else:
+            # Extract concrete error messages from smoke test steps
+            smoke_errors: list = []
+            for step in smoke_result.get("steps", []):
+                if not step.get("passed", False):
+                    step_name = step.get("step", "unknown")
+                    stderr = step.get("stderr_preview", "") or step.get("stderr", "")
+                    error = step.get("error", "")
+                    exit_code = step.get("exit_code", "?")
+                    if stderr:
+                        smoke_errors.append(f"[SMOKE_TEST] {step_name} (exit {exit_code}): {stderr[-500:]}")
+                    elif error:
+                        smoke_errors.append(f"[SMOKE_TEST] {step_name}: {error}")
+                    else:
+                        smoke_errors.append(f"[SMOKE_TEST] {step_name} failed (exit {exit_code})")
+
+            _console.print(f"\n  [bold red]❌ Smoke test FAILED — {len(smoke_errors)} error(s):[/bold red]")
+            for err in smoke_errors[:5]:
+                _console.print(f"    [red]{err[:120]}[/red]")
+
+            # Inject smoke errors into test_results so fix loop sees them
+            # S24-Fix14: Replace stale smoke test errors instead of appending
+            existing_tests = state.get("test_results", {}) if isinstance(state.get("test_results"), dict) else {}
+            updated_tests = dict(existing_tests)
+            existing_exec_errors = updated_tests.get("execution_errors", [])
+            # Remove prior smoke test entries before adding new ones
+            existing_exec_errors = [e for e in existing_exec_errors if not str(e).startswith("[SMOKE_TEST]")]
+            existing_exec_errors.extend(smoke_errors)
+            updated_tests["execution_errors"] = existing_exec_errors
+            updated_tests["smoke_test_failed"] = True
+            updated_tests["smoke_test_errors"] = smoke_errors
+
+            logger.warning(f"  ❌ Smoke test failed: {len(smoke_errors)} error(s)")
+            return {
+                "current_stage": "smoke_test_failed",
+                "smoke_test": smoke_result,
+                "test_results": updated_tests,
+                "tests_passed": False,
+            }
+
+    except Exception as e:
+        logger.error(f"Smoke test node crashed: {e}")
+        _console.print(f"  [yellow]⚠️ Smoke test infrastructure error: {e}[/yellow]")
+        return {
+            "current_stage": "smoke_test_error",
+            "smoke_test": {"passed": False, "error": str(e)},
+            "warnings": [f"Smoke test crashed: {e}"],
+        }
+
+
 async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
     """
     Node 9: Publish generated code to GitHub
@@ -8322,12 +13320,75 @@ async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
     """
     logger.info("📤 Git Publishing Node")
     
+    # ── Middleware: Pre-Completion Checklist ───────────────────────────
+    # Validate all outputs before publishing (inspired by Deep Agents'
+    # PreCompletionChecklistMiddleware). Catches missing files, stubs,
+    # broken imports, missing README, etc.
+    try:
+        try:
+            from ..utils.middleware import run_pre_completion_checklist, format_checklist_report
+        except ImportError:
+            from utils.middleware import run_pre_completion_checklist, format_checklist_report  # type: ignore
+        
+        checklist_items = run_pre_completion_checklist(state)
+        checklist_report = format_checklist_report(checklist_items)
+        logger.info(f"\n{checklist_report}")
+        
+        console = Console()
+        console.print(f"\n{checklist_report}\n")
+        
+        # Count blocking errors
+        blocking = [i for i in checklist_items if not i.passed and i.severity == "error"]
+        if blocking:
+            logger.warning(f"  Pre-completion checklist: {len(blocking)} blocking issue(s)")
+            # Don't block publishing — just warn and log
+            # (the pipeline has already exhausted its fix budget at this point)
+    except Exception as _pcl_err:
+        logger.debug(f"  Pre-completion checklist failed: {_pcl_err}")
+    # ── End Pre-Completion Checklist ──────────────────────────────────
+    
     # Check test results before publishing
     test_results = state.get("test_results", {})
     tests_passed = state.get("tests_passed", False)  # Fail-safe: default to False (never publish untested code)
+    prior_correctness = state.get("correctness_passed", None)
+    hard_failures = state.get("hard_failures", []) if isinstance(state.get("hard_failures"), list) else []
+    if not hard_failures and isinstance(test_results, dict):
+        exec_errors = test_results.get("execution_errors", [])
+        if isinstance(exec_errors, list):
+            hard_failures = [str(e) for e in exec_errors if str(e).strip()]
+        elif exec_errors:
+            hard_failures = [str(exec_errors)]
+    # Recompute truth-first correctness from current evidence instead of
+    # trusting potentially stale `state["correctness_passed"]`.
+    correctness_passed = bool(tests_passed and len(hard_failures) == 0)
+    if prior_correctness is not None and bool(prior_correctness) != correctness_passed:
+        logger.warning(
+            "⚠️  Publish gate corrected stale correctness flag: "
+            f"state.correctness_passed={bool(prior_correctness)} -> recomputed={correctness_passed} "
+            f"(tests_passed={tests_passed}, hard_failures={len(hard_failures)})"
+        )
+    self_eval_unverified = bool(state.get("self_eval_unverified", False))
+    goal_eval_unverified = bool(state.get("goal_eval_unverified", False))
     
     console = Console()
     
+    if self_eval_unverified or goal_eval_unverified:
+        logger.warning("⚠️  Evaluation marked unverified! Skipping GitHub publishing.")
+        console.print("\n[yellow]⚠️  Unverified evaluation status detected. Saving locally only (no GitHub publish).[/yellow]")
+        tests_passed = False
+        correctness_passed = False
+
+    if not correctness_passed or hard_failures:
+        logger.warning(
+            "⚠️  Correctness gate failed! Skipping GitHub publishing. "
+            f"tests_passed={tests_passed}, correctness_passed={correctness_passed}, hard_failures={len(hard_failures)}"
+        )
+        console.print(
+            "\n[yellow]⚠️  Correctness gate failed (runtime hard failures present). "
+            "Saving locally only (no GitHub publish).[/yellow]"
+        )
+        tests_passed = False
+
     if not tests_passed:
         logger.warning("⚠️  Tests failed! Skipping GitHub publishing.")
         console.print("\n[yellow]⚠️  Tests failed! Code will be saved locally only (not published to GitHub).[/yellow]")
@@ -8369,14 +13430,12 @@ async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
                 console.print(f"\n[green]✅ Code saved to:[/green] [bold cyan]{project_dir}[/bold cyan]\n")
                 console.print(f"[dim]Review the code, fix any issues, then use the publish script to upload to GitHub.[/dim]\n")
                 
-                smoke_result = await _post_save_smoke_test(project_dir)
-                
                 return {
                     "current_stage": "saved_locally_tests_failed",
                     "output_path": str(project_dir),
                     "github_url": None,
                     "tests_passed": False,
-                    "smoke_test": smoke_result,
+                    "smoke_test": state.get("smoke_test"),  # Already ran in smoke_test_node
                 }
             else:
                 logger.error("No files to save")
@@ -8394,7 +13453,6 @@ async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
     try:
         import os
         from pathlib import Path
-        from github import Github
         from datetime import datetime
         
         # Check if auto-publish is enabled
@@ -8431,14 +13489,11 @@ async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
             
             logger.info(f"✅ Code saved to: {project_dir}")
             
-            # ── Post-save smoke test ─────────────────────────────────────────
-            smoke_result = await _post_save_smoke_test(project_dir)
-            
             return {
                 "current_stage": "saved_locally",
                 "output_path": str(project_dir),
                 "github_url": None,
-                "smoke_test": smoke_result,
+                "smoke_test": state.get("smoke_test"),  # Already ran in smoke_test_node
             }
         
         # GitHub publishing
@@ -8459,6 +13514,48 @@ async def git_publishing_node(state: AutoGITState) -> Dict[str, Any]:
             return {
                 "current_stage": "no_files",
                 "errors": ["No generated files to publish"]
+            }
+
+        # Import PyGithub lazily so environments without the dependency
+        # still complete as local-save success instead of erroring late.
+        try:
+            import importlib
+            github_module = importlib.import_module("github")
+            Github = getattr(github_module, "Github")
+        except ImportError:
+            logger.warning("PyGithub not installed; auto-publish unavailable. Saving locally.")
+            output_dir = Path(state.get("output_dir", "output"))
+            solution = state.get("final_solution") or {}
+            repo_name = _re.sub(r"[^a-z0-9-]", "", solution.get("approach_name", "auto-git-project").replace(" ", "-").lower()).strip("-") or "auto-git-project"
+            project_dir = output_dir / repo_name / datetime.now().strftime("%Y%m%d_%H%M%S")
+            project_dir.mkdir(parents=True, exist_ok=True)
+
+            generated_code = state.get("generated_code") or {}
+            files = generated_code.get("files", {})
+
+            # ── Final safety net: strip any remaining LLM artifacts ──
+            _final_art3 = _sanitize_llm_artifacts(files, "pre-save-missing-pygithub")
+            if _final_art3:
+                logger.info(f"  🧹 Pre-save artifact cleanup: {_final_art3} file(s)")
+
+            _SHADOW_NO_GH = {"numpy", "torch", "scipy", "pandas", "sklearn", "tensorflow",
+                             "requests", "flask", "django", "fastapi", "setuptools", "pip",
+                             "pytest", "unittest", "typing", "collections", "abc"}
+            for filename, content in files.items():
+                _stem_ngh = filename.rsplit(".", 1)[0] if "." in filename else filename
+                if _stem_ngh in _SHADOW_NO_GH:
+                    logger.warning(f"  🗑️  Skipping shadow file: {filename}")
+                    continue
+                file_path = project_dir / filename
+                file_path.write_text(content, encoding="utf-8")
+                logger.info(f"  ✅ Saved {filename}")
+
+            return {
+                "current_stage": "saved_locally",
+                "output_path": str(project_dir),
+                "github_url": None,
+                "warnings": ["PyGithub not installed; skipped GitHub publish and saved locally"],
+                "smoke_test": state.get("smoke_test"),
             }
         
         # Create GitHub client

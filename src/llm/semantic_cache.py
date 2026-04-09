@@ -181,6 +181,8 @@ class SemanticCache:
         hash_value = hashlib.md5(text.encode()).hexdigest()
         # Convert hex to normalized float vector
         embedding = [int(hash_value[i:i+2], 16) / 255.0 for i in range(0, len(hash_value), 2)]
+        # Pad to match Ollama embedding dimension (384) to avoid dimension mismatch
+        embedding.extend([0.0] * (384 - len(embedding)))
         return embedding
     
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:

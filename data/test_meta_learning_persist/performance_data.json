@@ -1,0 +1,26 @@
+{
+  "total_selections": 0,
+  "total_successes": 30,
+  "exploration_rate": 0.1,
+  "strategies": {
+    "persist_strategy": {
+      "total_attempts": 30,
+      "successful_attempts": 30,
+      "total_quality_score": 240.0,
+      "total_latency": 150.0,
+      "total_tokens": 30000,
+      "alpha": 31.0,
+      "beta": 1.0,
+      "context_performance": {
+        "test_simple_test": {
+          "attempts": 30,
+          "successes": 30,
+          "success_rate": 1.0,
+          "avg_quality": 8.0,
+          "total_quality": 240.0
+        }
+      },
+      "last_used": 1769231928.8194885
+    }
+  }
+}

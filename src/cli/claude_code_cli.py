@@ -142,6 +142,104 @@ class MCPServerManager:
         self.tools = {}
         self.resources = {}
         self.prompts = {}
+        self._request_id = 0
+        self._stderr_tasks: Dict[str, asyncio.Task] = {}
+        self.max_retries = 3
+
+    def _next_request_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    def _frame_message(self, payload: Dict[str, Any]) -> str:
+        message = json.dumps(payload)
+        length = len(message.encode("utf-8"))
+        return f"Content-Length: {length}\r\n\r\n{message}"
+
+    async def _read_response(self, proc, timeout: int = 10) -> Optional[Dict[str, Any]]:
+        """Read one MCP response (Content-Length framed preferred, newline fallback)."""
+        loop = asyncio.get_running_loop()
+        try:
+            header_line = await asyncio.wait_for(
+                loop.run_in_executor(None, proc.stdout.readline),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return None
+
+        if not header_line:
+            return None
+
+        line = header_line.strip()
+        try:
+            if line.lower().startswith("content-length:"):
+                parts = line.split(":", 1)
+                content_length = int(parts[1].strip())
+                # Consume header terminator line.
+                await asyncio.wait_for(loop.run_in_executor(None, proc.stdout.readline), timeout=timeout)
+                body = await asyncio.wait_for(
+                    loop.run_in_executor(None, proc.stdout.read, content_length),
+                    timeout=timeout,
+                )
+                return json.loads(body)
+
+            # Backward compatibility: newline-delimited JSON from non-compliant servers.
+            return json.loads(line)
+        except Exception:
+            return None
+
+    async def _send_request(
+        self,
+        proc,
+        method: str,
+        params: Dict[str, Any],
+        timeout: int = 10,
+        retries: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        max_attempts = retries if retries is not None else self.max_retries
+        loop = asyncio.get_running_loop()
+
+        for attempt in range(max_attempts):
+            req_id = self._next_request_id()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": method,
+                "params": params,
+            }
+            try:
+                framed = self._frame_message(payload)
+                await asyncio.wait_for(loop.run_in_executor(None, proc.stdin.write, framed), timeout=timeout)
+                await asyncio.wait_for(loop.run_in_executor(None, proc.stdin.flush), timeout=timeout)
+
+                response = await self._read_response(proc, timeout=timeout)
+                if response is None:
+                    raise TimeoutError(f"No response for method '{method}'")
+
+                # Only accept response that matches request id.
+                if response.get("id") != req_id:
+                    raise ValueError(f"Mismatched MCP response id for method '{method}'")
+
+                return response
+            except Exception as err:
+                if attempt >= max_attempts - 1:
+                    console.print(f"[dim yellow]MCP request failed ({method}): {err}[/dim yellow]")
+                    return None
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+        return None
+
+    async def _stream_stderr(self, server_name: str, proc) -> None:
+        """Drain stderr in background to avoid pipe backpressure deadlocks."""
+        loop = asyncio.get_running_loop()
+        try:
+            while proc.poll() is None:
+                line = await loop.run_in_executor(None, proc.stderr.readline)
+                if not line:
+                    await asyncio.sleep(0.05)
+                    continue
+                console.print(f"[dim]{server_name} stderr: {line.strip()}[/dim]")
+        except Exception:
+            return
     
     async def load_config(self):
         """Load MCP server configuration"""
@@ -214,45 +312,22 @@ class MCPServerManager:
                     text=True,
                     bufsize=1,
                 )
-                
-                # Send JSON-RPC initialize request
-                init_request = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "auto-git", "version": "1.0.0"},
-                    },
-                })
-                
+                self._stderr_tasks[name] = asyncio.create_task(self._stream_stderr(name, proc))
+
                 try:
-                    proc.stdin.write(init_request + "\n")
-                    proc.stdin.flush()
-                    
-                    # Read response with timeout
-                    import select
-                    import platform
-                    if platform.system() == "Windows":
-                        # Windows doesn't support select on pipes, use threading
-                        import threading
-                        response_line = [None]
-                        def _read():
-                            try:
-                                response_line[0] = proc.stdout.readline()
-                            except Exception:
-                                pass
-                        t = threading.Thread(target=_read, daemon=True)
-                        t.start()
-                        t.join(timeout=5)
-                        resp_text = response_line[0]
-                    else:
-                        ready, _, _ = select.select([proc.stdout], [], [], 5)
-                        resp_text = proc.stdout.readline() if ready else None
-                    
-                    if resp_text:
-                        resp = json.loads(resp_text.strip())
+                    resp = await self._send_request(
+                        proc,
+                        "initialize",
+                        {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "clientInfo": {"name": "auto-git", "version": "1.0.0"},
+                        },
+                        timeout=5,
+                        retries=2,
+                    )
+
+                    if resp and "result" in resp:
                         server_info = resp.get("result", {}).get("serverInfo", {})
                         self.servers[name] = {
                             "config": config,
@@ -303,29 +378,8 @@ class MCPServerManager:
             proc = server_info.get("process")
             if proc and proc.poll() is None:
                 try:
-                    # Send tools/list request
-                    request = json.dumps({
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "method": "tools/list",
-                        "params": {},
-                    })
-                    proc.stdin.write(request + "\n")
-                    proc.stdin.flush()
-                    
-                    import threading
-                    response_line = [None]
-                    def _read():
-                        try:
-                            response_line[0] = proc.stdout.readline()
-                        except Exception:
-                            pass
-                    t = threading.Thread(target=_read, daemon=True)
-                    t.start()
-                    t.join(timeout=5)
-                    
-                    if response_line[0]:
-                        resp = json.loads(response_line[0].strip())
+                    resp = await self._send_request(proc, "tools/list", {}, timeout=5, retries=2)
+                    if resp and "result" in resp:
                         tools = resp.get("result", {}).get("tools", [])
                         for tool in tools:
                             tool["server"] = server_name
@@ -401,29 +455,15 @@ class MCPServerManager:
         
         if proc and proc.poll() is None:
             try:
-                # Send JSON-RPC tool call
-                request = json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": 100,
-                    "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": params},
-                })
-                proc.stdin.write(request + "\n")
-                proc.stdin.flush()
-                
-                import threading
-                response_line = [None]
-                def _read():
-                    try:
-                        response_line[0] = proc.stdout.readline()
-                    except Exception:
-                        pass
-                t = threading.Thread(target=_read, daemon=True)
-                t.start()
-                t.join(timeout=30)
-                
-                if response_line[0]:
-                    resp = json.loads(response_line[0].strip())
+                resp = await self._send_request(
+                    proc,
+                    "tools/call",
+                    {"name": tool_name, "arguments": params},
+                    timeout=30,
+                    retries=2,
+                )
+
+                if resp:
                     if "error" in resp:
                         return {"status": "error", "error": resp["error"]}
                     return {"status": "success", "result": resp.get("result", {})}
@@ -438,9 +478,13 @@ class MCPServerManager:
     async def _execute_builtin(self, tool_name: str, params: Dict[str, Any]) -> Any:
         """Built-in fallback implementations for common tools."""
         import os
+        _workspace = os.path.realpath(os.getcwd())
         
         if tool_name == "read_file":
             path = params.get("path", "")
+            _resolved = os.path.realpath(path)
+            if not _resolved.startswith(_workspace):
+                return {"status": "error", "error": f"Path traversal blocked: {path} is outside workspace"}
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     content = f.read()
@@ -451,6 +495,9 @@ class MCPServerManager:
         elif tool_name == "write_file":
             path = params.get("path", "")
             content = params.get("content", "")
+            _resolved = os.path.realpath(path)
+            if not _resolved.startswith(_workspace):
+                return {"status": "error", "error": f"Path traversal blocked: {path} is outside workspace"}
             try:
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
@@ -461,6 +508,9 @@ class MCPServerManager:
         
         elif tool_name == "list_directory":
             path = params.get("path", ".")
+            _resolved = os.path.realpath(path)
+            if not _resolved.startswith(_workspace):
+                return {"status": "error", "error": f"Path traversal blocked: {path} is outside workspace"}
             try:
                 entries = os.listdir(path)
                 return {"status": "success", "result": entries}

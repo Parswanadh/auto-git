@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, TypeVar, Generic, Callable
 from functools import wraps
+import re
 import sqlite3
 
 from src.utils.logger import get_logger
@@ -278,6 +279,8 @@ class SQLiteCache(BaseCache):
             default_ttl: Default TTL in seconds
         """
         super().__init__(name, default_ttl)
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+            raise ValueError(f"Invalid cache name: {name!r}")
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

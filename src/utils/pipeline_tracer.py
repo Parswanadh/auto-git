@@ -50,6 +50,94 @@ _ALL_NODES: List[str] = [
 ]
 
 
+def compute_error_count(state: Dict[str, Any]) -> int:
+    """Compute a consistent operator-facing error count from workflow state."""
+    if not isinstance(state, dict):
+        return 0
+
+    errors = state.get("errors") or []
+    if not isinstance(errors, list):
+        errors = []
+    top_level_errors = len(errors)
+
+    hard_failures = state.get("hard_failures") or []
+    if not isinstance(hard_failures, list):
+        hard_failures = []
+    hard_failure_count = len(hard_failures)
+
+    quality_gate = state.get("quality_gate") if isinstance(state.get("quality_gate"), dict) else {}
+    qg_hard = int(quality_gate.get("hard_failures_count", 0) or 0)
+
+    return max(top_level_errors, hard_failure_count, qg_hard)
+
+
+def validate_trace_status_parity(
+    trace_snapshot: Dict[str, Any],
+    status_snapshot: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate parity between tracer runtime counters and workflow status snapshot."""
+    mismatches: List[str] = []
+
+    trace_calls = trace_snapshot.get("node_calls") or {}
+    status_calls = status_snapshot.get("node_calls") or {}
+    if not isinstance(trace_calls, dict):
+        trace_calls = {}
+    if not isinstance(status_calls, dict):
+        status_calls = {}
+
+    normalized_trace_calls: Dict[str, int] = {}
+    normalized_status_calls: Dict[str, int] = {}
+
+    for node, trace_count in trace_calls.items():
+        try:
+            normalized_trace_calls[node] = int(trace_count)
+        except Exception:
+            normalized_trace_calls[node] = 0
+
+    for node, status_count in status_calls.items():
+        try:
+            normalized_status_calls[node] = int(status_count)
+        except Exception:
+            normalized_status_calls[node] = 0
+
+    for node, trace_count in normalized_trace_calls.items():
+        status_count = normalized_status_calls.get(node)
+        if status_count is None:
+            mismatches.append(f"status missing node count: {node}")
+            continue
+        if status_count != trace_count:
+            mismatches.append(f"count mismatch for {node}: trace={trace_count}, status={status_count}")
+
+    for node in normalized_status_calls.keys():
+        if node not in normalized_trace_calls:
+            mismatches.append(f"trace missing node count: {node}")
+
+    trace_stage = str(trace_snapshot.get("current_stage", ""))
+    status_stage = str(status_snapshot.get("current_stage", ""))
+    if status_stage and trace_stage and status_stage != trace_stage:
+        mismatches.append(f"stage mismatch: trace={trace_stage}, status={status_stage}")
+
+    trace_errors = int(trace_snapshot.get("error_count", 0) or 0)
+    status_errors = int(status_snapshot.get("error_count", 0) or 0)
+    if trace_errors != status_errors:
+        mismatches.append(f"error_count mismatch: trace={trace_errors}, status={status_errors}")
+
+    return {
+        "ok": len(mismatches) == 0,
+        "mismatches": mismatches,
+        "trace": {
+            "node_calls": normalized_trace_calls,
+            "current_stage": trace_stage,
+            "error_count": trace_errors,
+        },
+        "status": {
+            "node_calls": normalized_status_calls,
+            "current_stage": status_stage,
+            "error_count": status_errors,
+        },
+    }
+
+
 class PipelineTracer:
     """
     Lightweight tracer that records every node execution in JSONL format and
@@ -125,8 +213,10 @@ class PipelineTracer:
         # Accumulate per-node timing
         self._node_timings.setdefault(node_name, []).append(elapsed)
 
+        error_count = self._compute_error_count(self._full_state)
         errors = self._full_state.get("errors") or []
-        if not isinstance(errors, list): errors = []
+        if not isinstance(errors, list):
+            errors = []
 
         try:
             context = self._summarise(node_name, self._full_state)
@@ -142,12 +232,29 @@ class PipelineTracer:
             "current_stage": self._full_state.get("current_stage", ""),
             "context":       context,
             "errors_last3":  errors[-3:],
-            "error_count":   len(errors),
+            "error_count":   error_count,
         }
         self._write(record)
         # Save a JSON snapshot so humans can inspect pipeline state (and as a
         # readable complement to the LangGraph SQLite checkpoint).
         self.save_checkpoint(node_name)
+
+    def get_runtime_snapshot(self) -> Dict[str, Any]:
+        """Return runtime trace snapshot for parity checks."""
+        error_count = self._compute_error_count(self._full_state)
+        return {
+            "node_calls": dict(self._call_count),
+            "current_stage": str(self._full_state.get("current_stage", "")),
+            "error_count": error_count,
+        }
+
+    def _compute_error_count(self, state: Dict[str, Any]) -> int:
+        """Compute an operator-safe error count using hard-failure aware sources."""
+        return compute_error_count(state)
+
+    def validate_status_snapshot(self, status_snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare live trace counters against workflow status snapshot."""
+        return validate_trace_status_parity(self.get_runtime_snapshot(), status_snapshot)
 
     def save_checkpoint(self, last_node: str) -> None:
         """Write a human-readable JSON checkpoint of the full accumulated state.
@@ -199,17 +306,19 @@ class PipelineTracer:
             self._full_state.update({k: v for k, v in final_state.items() if v is not None})
         agg = self._full_state
 
-        self._write({
-            "event":        "pipeline_end",
-            "ts":           datetime.now().isoformat(),
-            "node_calls":   dict(self._call_count),
-            "final_stage":  agg.get("current_stage", ""),
-            "github_repo":  agg.get("github_repo", ""),
-            "error_count":  len(agg.get("errors") or []),
-            "files_generated": list((agg.get("generated_code") or {}).keys()),
-            "token_stats":  token_stats,
-        })
-        self._fh.close()
+        try:
+            self._write({
+                "event":        "pipeline_end",
+                "ts":           datetime.now().isoformat(),
+                "node_calls":   dict(self._call_count),
+                "final_stage":  agg.get("current_stage", ""),
+                "github_repo":  agg.get("github_repo", ""),
+                "error_count":  self._compute_error_count(agg),
+                "files_generated": list((agg.get("generated_code") or {}).keys()),
+                "token_stats":  token_stats,
+            })
+        finally:
+            self._fh.close()
 
         # Write model health JSON
         try:
@@ -430,6 +539,15 @@ class PipelineTracer:
         lines.append("# 🤖 Auto-GIT Agent & Model Status Report\n")
         lines.append(f"**Run**: `{self.ts}`  ")
         lines.append(f"**Idea**: _{self.idea[:120]}_\n")
+
+        final_stage = str(self._full_state.get("current_stage", "") or "")
+        if final_stage:
+            lines.append(f"**Final Stage**: `{final_stage}`  ")
+        final_status = str(self._full_state.get("final_status", "") or "")
+        if final_status:
+            lines.append(f"**Final Status**: `{final_status}`\n")
+        else:
+            lines.append("")
 
         # ── Pipeline node execution table ──────────────────────────────────
         lines.append("## 📊 Pipeline Node Execution\n")

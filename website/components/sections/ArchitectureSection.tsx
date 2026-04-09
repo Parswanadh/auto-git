@@ -2,6 +2,7 @@
 
 import { motion, useInView } from 'framer-motion';
 import { useRef } from 'react';
+import { evidenceMetrics } from '@/data/evidenceMetrics';
 
 const subsystems = [
   {
@@ -33,8 +34,8 @@ const selfHealing = [
 
 const infrastructure = [
   { name: '5-Stage Validator', desc: 'syntax → types → security → lint → score', icon: '✅' },
-  { name: 'Error Memory (JSONL)', desc: '233 entries, learns from past runs', icon: '📝' },
-  { name: 'Model Manager', desc: '5-tier fallback, 27+ models, health cache', icon: '🤖' },
+  { name: 'Error Memory (JSONL)', desc: `${evidenceMetrics.errorMemoryEntries.value} entries, learns from past runs`, icon: '📝' },
+  { name: 'Model Manager', desc: '4 profiles, provider failover lanes, health cache', icon: '🤖' },
 ];
 
 export default function ArchitectureSection() {

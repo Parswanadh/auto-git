@@ -2,9 +2,10 @@
 
 import { motion, useInView } from 'framer-motion';
 import { useRef } from 'react';
+import { EVIDENCE_AS_OF, evidenceMetrics } from '@/data/evidenceMetrics';
 
 const completed = [
-  '15-node LangGraph pipeline',
+  `${evidenceMetrics.pipelineNodes.value}-node LangGraph pipeline`,
   'Multi-agent debate system',
   'Self-improving error memory',
   '5-stage validation pipeline',
@@ -12,7 +13,7 @@ const completed = [
   'Strategy reasoner (reasoning-in-the-loop)',
   'Smart model management (5-tier fallback)',
   'GitHub auto-publishing',
-  '27 successful pipeline runs',
+  `${evidenceMetrics.runArtifactsTracked.value} traceable run artifacts logged`,
 ];
 
 const inProgress = [
@@ -46,6 +47,9 @@ export default function RoadmapSection() {
           <h2 className="font-orbitron font-bold text-3xl md:text-5xl mb-4 bg-gradient-to-r from-[#00D4FF] to-[#7C3AED] bg-clip-text text-transparent">
             Roadmap
           </h2>
+          <p className="mx-auto max-w-3xl text-sm text-[rgba(248,250,252,0.55)]">
+            Claims synced to evidence snapshot {EVIDENCE_AS_OF}.
+          </p>
         </motion.div>
 
         <div className="grid md:grid-cols-3 gap-6">

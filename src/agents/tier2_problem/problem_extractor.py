@@ -71,7 +71,7 @@ Output ONLY valid JSON with this structure:
             temperature=0.3  # Lower temperature for extraction
         )
         
-        content = response.get("response", "")
+        content = response.get("content", response.get("response", ""))
         
         # Parse JSON response
         try:

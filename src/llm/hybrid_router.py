@@ -67,7 +67,7 @@ class HybridRouter:
         task_type: str,
         messages: List[Dict[str, str]],
         max_retries: Optional[int] = None,
-        timeout: float = 60.0,
+        timeout: float = 300.0,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> Optional[GenerationResult]:
@@ -183,7 +183,7 @@ class HybridRouter:
         messages: List[Dict[str, str]],
         backends: Optional[List[str]] = None,
         return_first: bool = True,
-        timeout: float = 60.0,
+        timeout: float = 300.0,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None
     ) -> List[GenerationResult]:
@@ -216,14 +216,14 @@ class HybridRouter:
                 logger.warning(f"Backend {backend_name} not available, skipping")
                 continue
             
-            task = self._generate_single(
+            task = asyncio.create_task(self._generate_single(
                 backend_name=backend_name,
                 task_type=task_type,
                 messages=messages,
                 timeout=timeout,
                 temperature=temperature,
                 max_tokens=max_tokens
-            )
+            ))
             tasks.append(task)
         
         if not tasks:
@@ -243,6 +243,9 @@ class HybridRouter:
                 task.cancel()
             
             results = [task.result() for task in done if not task.cancelled()]
+            if not results:
+                logger.error("Parallel generation: all tasks failed or were cancelled")
+                return []
             logger.info(f"Parallel generation: first completed in {results[0].latency:.2f}s")
             return results
         else:

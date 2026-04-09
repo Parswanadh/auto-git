@@ -66,6 +66,8 @@ checkpoints/
 data/checkpoints/
 data/memory/
 data/metrics/
+data/pip_cache/
+data/test_env_cache/
 data/test_memory/
 data/vector_db/
 state_*.json

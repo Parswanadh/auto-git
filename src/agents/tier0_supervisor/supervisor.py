@@ -134,10 +134,8 @@ class PipelineSupervisor:
         
         # Check Ollama connection
         try:
-            from src.utils.ollama_client import get_ollama_client
-            client = get_ollama_client()
-            # Quick ping to Ollama
-            asyncio.run(client.list_models())
+            import ollama as _ollama_sync
+            _ollama_sync.list()
             return True
         except Exception as e:
             logger.error(f"Health check failed: {e}")

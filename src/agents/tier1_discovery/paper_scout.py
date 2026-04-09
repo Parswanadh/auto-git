@@ -12,6 +12,11 @@ from src.models.schemas import PaperMetadata
 from src.utils.logger import get_logger
 from src.utils.config import load_config
 
+try:
+    from langgraph.graph import END
+except ImportError:
+    END = "end"
+
 
 logger = get_logger("agents.paper_scout")
 

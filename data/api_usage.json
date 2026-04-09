@@ -1,0 +1,62 @@
+{
+  "current_date": "2026-01-26",
+  "groq": {
+    "requests": 14,
+    "cost": 0.0
+  },
+  "openrouter_free": {
+    "requests": 0,
+    "cost": 0.0
+  },
+  "local": {
+    "requests": 0,
+    "cost": 0.0
+  },
+  "history": [
+    {
+      "date": "2026-01-22",
+      "groq": {
+        "requests": 12,
+        "cost": 0.0
+      },
+      "openrouter_free": {
+        "requests": 0,
+        "cost": 0.0
+      },
+      "local": {
+        "requests": 5,
+        "cost": 0.0
+      }
+    },
+    {
+      "date": "2026-01-23",
+      "groq": {
+        "requests": 1,
+        "cost": 0.0
+      },
+      "openrouter_free": {
+        "requests": 0,
+        "cost": 0.0
+      },
+      "local": {
+        "requests": 0,
+        "cost": 0.0
+      }
+    },
+    {
+      "date": "2026-01-24",
+      "groq": {
+        "requests": 5,
+        "cost": 0.0
+      },
+      "openrouter_free": {
+        "requests": 0,
+        "cost": 0.0
+      },
+      "local": {
+        "requests": 1,
+        "cost": 0.0
+      }
+    }
+  ]
+}

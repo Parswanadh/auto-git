@@ -4,10 +4,15 @@ Resource Monitor for Auto-GIT
 Monitors CPU, RAM, GPU VRAM to prevent crashes
 """
 
-import psutil
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    psutil = None
+    HAS_PSUTIL = False
 import time
 import threading
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
@@ -33,48 +38,90 @@ class ResourceMonitor:
             "gpu_utilization": 0.0,
         }
         self.warnings = []
+
+    def get_stats_snapshot(self) -> Dict[str, float]:
+        """Return a fresh copy of the latest resource stats."""
+        self.update_stats()
+        return dict(self.stats)
+
+    def evaluate_resources(
+        self,
+        max_cpu_percent: float = 90.0,
+        max_ram_percent: float = 85.0,
+        max_vram_percent: float = 85.0,
+        min_free_ram_gb: float = 0.0,
+        min_free_vram_mb: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Evaluate whether the system has enough free headroom for heavy work."""
+        snapshot = self.get_stats_snapshot()
+        ram_free_gb = max(snapshot["ram_total_gb"] - snapshot["ram_used_gb"], 0.0)
+        vram_total_mb = snapshot["gpu_vram_total_mb"]
+        vram_used_mb = snapshot["gpu_vram_used_mb"]
+        vram_free_mb = max(vram_total_mb - vram_used_mb, 0.0) if vram_total_mb > 0 else float("inf")
+        vram_percent = (vram_used_mb / vram_total_mb * 100.0) if vram_total_mb > 0 else 0.0
+
+        reasons: List[str] = []
+        if snapshot["cpu_percent"] > max_cpu_percent:
+            reasons.append(f"CPU usage {snapshot['cpu_percent']:.1f}% > {max_cpu_percent:.1f}%")
+        if snapshot["ram_percent"] > max_ram_percent:
+            reasons.append(f"RAM usage {snapshot['ram_percent']:.1f}% > {max_ram_percent:.1f}%")
+        if ram_free_gb < min_free_ram_gb:
+            reasons.append(f"Free RAM {ram_free_gb:.1f} GB < {min_free_ram_gb:.1f} GB")
+        if vram_total_mb > 0:
+            if vram_percent > max_vram_percent:
+                reasons.append(f"GPU VRAM usage {vram_percent:.1f}% > {max_vram_percent:.1f}%")
+            if vram_free_mb < min_free_vram_mb:
+                reasons.append(f"Free GPU VRAM {vram_free_mb:.0f} MB < {min_free_vram_mb:.0f} MB")
+
+        return {
+            "safe": not reasons,
+            "reasons": reasons,
+            "stats": snapshot,
+            "ram_free_gb": ram_free_gb,
+            "vram_free_mb": vram_free_mb,
+            "vram_percent": vram_percent,
+        }
     
     def get_gpu_stats(self) -> Dict[str, float]:
-        """Get GPU statistics if available"""
+        """Get GPU statistics if available.
+        
+        Guards against nvidia driver access violations (OSError) that can
+        occur when the driver is transiently unavailable or corrupted.
+        """
+        _default = {"vram_used_mb": 0.0, "vram_total_mb": 0.0, "utilization": 0.0}
         try:
             import gpustat
             gpu_stats = gpustat.GPUStatCollection.new_query()
-            
             if gpu_stats and len(gpu_stats.gpus) > 0:
-                gpu = gpu_stats.gpus[0]  # First GPU
+                gpu = gpu_stats.gpus[0]
                 return {
                     "vram_used_mb": gpu.memory_used,
                     "vram_total_mb": gpu.memory_total,
                     "utilization": gpu.utilization,
                 }
-        except ImportError:
-            # Try nvidia-ml-py
-            try:
-                import pynvml
-                pynvml.nvmlInit()
-                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                
-                info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                
-                pynvml.nvmlShutdown()
-                
-                return {
-                    "vram_used_mb": info.used / 1024 / 1024,
-                    "vram_total_mb": info.total / 1024 / 1024,
-                    "utilization": util.gpu,
-                }
-            except Exception:
-                pass
-        
-        return {
-            "vram_used_mb": 0.0,
-            "vram_total_mb": 0.0,
-            "utilization": 0.0,
-        }
+        except Exception:
+            pass
+        # Fallback to raw pynvml — also guarded against OSError / access violation
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            pynvml.nvmlShutdown()
+            return {
+                "vram_used_mb": info.used / 1024 / 1024,
+                "vram_total_mb": info.total / 1024 / 1024,
+                "utilization": util.gpu,
+            }
+        except Exception:
+            pass
+        return _default
     
     def update_stats(self):
         """Update all resource statistics"""
+        if not HAS_PSUTIL:
+            return
         # CPU
         self.stats["cpu_percent"] = psutil.cpu_percent(interval=0.1)
         
@@ -104,7 +151,10 @@ class ResourceMonitor:
     def _monitor_loop(self):
         """Background monitoring loop"""
         while self.monitoring:
-            self.update_stats()
+            try:
+                self.update_stats()
+            except Exception:
+                pass  # Never let GPU driver errors kill the monitor thread
             time.sleep(self.check_interval)
     
     def start(self):
@@ -180,34 +230,55 @@ class ResourceMonitor:
         
         console.print("\n")
     
-    def check_safe_to_proceed(self) -> bool:
-        """Check if it's safe to proceed with heavy operations"""
-        self.update_stats()
-        
-        # Check RAM
-        if self.stats["ram_percent"] > 85:
-            console.print("[red]⚠️  RAM usage too high (>85%). Wait before proceeding.[/red]")
-            return False
-        
-        # Check GPU VRAM
-        if self.stats["gpu_vram_total_mb"] > 0:
-            vram_percent = (self.stats["gpu_vram_used_mb"] / self.stats["gpu_vram_total_mb"]) * 100
-            if vram_percent > 85:
-                console.print("[red]⚠️  GPU VRAM usage too high (>85%). Wait before proceeding.[/red]")
-                return False
-        
-        return True
+    def check_safe_to_proceed(
+        self,
+        max_cpu_percent: float = 90.0,
+        max_ram_percent: float = 85.0,
+        max_vram_percent: float = 85.0,
+        min_free_ram_gb: float = 0.0,
+        min_free_vram_mb: float = 0.0,
+        quiet: bool = False,
+    ) -> bool:
+        """Check if it's safe to proceed with heavy operations."""
+        evaluation = self.evaluate_resources(
+            max_cpu_percent=max_cpu_percent,
+            max_ram_percent=max_ram_percent,
+            max_vram_percent=max_vram_percent,
+            min_free_ram_gb=min_free_ram_gb,
+            min_free_vram_mb=min_free_vram_mb,
+        )
+        if not evaluation["safe"] and not quiet:
+            for reason in evaluation["reasons"]:
+                console.print(f"[red]⚠️  {reason}. Wait before proceeding.[/red]")
+        return evaluation["safe"]
     
-    def wait_for_resources(self, timeout: int = 60):
-        """Wait for resources to become available"""
+    def wait_for_resources(
+        self,
+        timeout: int = 60,
+        poll_interval: float = 2.0,
+        max_cpu_percent: float = 90.0,
+        max_ram_percent: float = 85.0,
+        max_vram_percent: float = 85.0,
+        min_free_ram_gb: float = 0.0,
+        min_free_vram_mb: float = 0.0,
+        quiet: bool = False,
+    ):
+        """Wait for resources to become available."""
         console.print("[yellow]Waiting for resources to become available...[/yellow]")
         
         start_time = time.time()
         while time.time() - start_time < timeout:
-            if self.check_safe_to_proceed():
+            if self.check_safe_to_proceed(
+                max_cpu_percent=max_cpu_percent,
+                max_ram_percent=max_ram_percent,
+                max_vram_percent=max_vram_percent,
+                min_free_ram_gb=min_free_ram_gb,
+                min_free_vram_mb=min_free_vram_mb,
+                quiet=quiet,
+            ):
                 console.print("[green]✓ Resources available[/green]")
                 return True
-            time.sleep(2)
+            time.sleep(poll_interval)
         
         console.print("[red]⚠️  Timeout waiting for resources[/red]")
         return False

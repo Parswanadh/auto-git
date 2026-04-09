@@ -125,37 +125,37 @@ async def moderate_debate(
             for solution in solutions:
                 critique = await critique_solution(solution, problem, router)
             
-            if not critique:
-                continue
-            
-            # Record this round
-            round_data = DebateRound(
-                round_number=round_num,
-                solution=solution,
-                critique=critique
-            )
-            debate_history.append(round_data)
-            
-            # Track best solution
-            if critique.real_world_feasibility > best_feasibility:
-                best_feasibility = critique.real_world_feasibility
-                best_solution = solution
-            
-            # Check for acceptance
-            if critique.verdict == "accept" and critique.real_world_feasibility >= ACCEPTANCE_THRESHOLD:
-                logger.info(f"\n🎉 CONSENSUS REACHED!")
-                logger.info(f"   Solution: {solution.approach_name}")
-                logger.info(f"   Feasibility: {critique.real_world_feasibility:.1f}/10")
-                logger.info(f"   Rounds taken: {round_num}")
+                if not critique:
+                    continue
                 
-                return FinalSolution(
+                # Record this round
+                round_data = DebateRound(
+                    round_number=round_num,
                     solution=solution,
-                    debate_history=debate_history,
-                    consensus_reached=True,
-                    confidence_score=critique.real_world_feasibility,
-                    iterations_taken=round_num,
-                    final_verdict=f"Accepted after {round_num} rounds of refinement"
+                    critique=critique
                 )
+                debate_history.append(round_data)
+                
+                # Track best solution
+                if critique.real_world_feasibility > best_feasibility:
+                    best_feasibility = critique.real_world_feasibility
+                    best_solution = solution
+                
+                # Check for acceptance
+                if critique.verdict == "accept" and critique.real_world_feasibility >= ACCEPTANCE_THRESHOLD:
+                    logger.info(f"\n🎉 CONSENSUS REACHED!")
+                    logger.info(f"   Solution: {solution.approach_name}")
+                    logger.info(f"   Feasibility: {critique.real_world_feasibility:.1f}/10")
+                    logger.info(f"   Rounds taken: {round_num}")
+                    
+                    return FinalSolution(
+                        solution=solution,
+                        debate_history=debate_history,
+                        consensus_reached=True,
+                        confidence_score=critique.real_world_feasibility,
+                        iterations_taken=round_num,
+                        final_verdict=f"Accepted after {round_num} rounds of refinement"
+                    )
         
         # Prepare feedback for next round
         if debate_history:

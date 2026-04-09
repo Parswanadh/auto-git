@@ -100,7 +100,7 @@ Output ONLY valid JSON:
             temperature=0.2  # Low - we want realistic assessment
         )
         
-        content = response.get("response", "")
+        content = response.get("content", response.get("response", ""))
         
         # Parse JSON
         try:

@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import PipelineAmbientBackground from "@/components/PipelineAmbientBackground";
+import VerificationBadge from "@/components/VerificationBadge";
+import ScrollProgress from "@/components/ScrollProgress";
 
 export const metadata: Metadata = {
   title: "Auto-GIT | AI-Powered Autonomous Software Development",
@@ -15,6 +18,9 @@ export default function RootLayout({
   return (
     <html lang="en" className="scroll-smooth">
       <body className="antialiased">
+        <ScrollProgress />
+        <PipelineAmbientBackground />
+
         {/* Background effects */}
         <div className="starfield" />
         <div className="particle-background" />
@@ -29,6 +35,8 @@ export default function RootLayout({
 
         {/* Main content */}
         {children}
+
+        <VerificationBadge />
       </body>
     </html>
   );

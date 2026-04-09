@@ -145,6 +145,17 @@ class SyntaxValidator(BaseValidator):
             ast.parse(code, filename=file_path)
             passed = True
             message = "Syntax is valid"
+        except IndentationError as e:
+            issues.append(ValidationIssue(
+                layer=self.name,
+                severity=ValidationSeverity.ERROR,
+                message=f"Indentation error: {e.msg}",
+                file=file_path,
+                line=e.lineno,
+                code=e.text.strip() if e.text else None,
+            ))
+            passed = False
+            message = f"Indentation error: {e.msg}"
         except SyntaxError as e:
             issues.append(ValidationIssue(
                 layer=self.name,
@@ -157,17 +168,6 @@ class SyntaxValidator(BaseValidator):
             ))
             passed = False
             message = f"Syntax error: {e.msg}"
-        except IndentationError as e:
-            issues.append(ValidationIssue(
-                layer=self.name,
-                severity=ValidationSeverity.ERROR,
-                message=f"Indentation error: {e.msg}",
-                file=file_path,
-                line=e.lineno,
-                code=e.text.strip() if e.text else None,
-            ))
-            passed = False
-            message = f"Indentation error: {e.msg}"
         except Exception as e:
             issues.append(ValidationIssue(
                 layer=self.name,
@@ -353,14 +353,15 @@ class SecurityValidator(BaseValidator):
                 f.write(code)
                 temp_path = f.name
 
-            result = subprocess.run(
-                ["bandit", "-f", "json", temp_path],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            os.unlink(temp_path)
+            try:
+                result = subprocess.run(
+                    ["bandit", "-f", "json", temp_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            finally:
+                os.unlink(temp_path)
 
             if result.stdout:
                 bandit_output = json.loads(result.stdout)
@@ -679,7 +680,8 @@ class MultiLayerValidator:
         results = {}
 
         for pattern in file_patterns:
-            for file_path in project_dir.rglob(pattern[3:]):  # Remove **/
+            _glob_pat = pattern[3:] if pattern.startswith("**/") else pattern
+            for file_path in project_dir.rglob(_glob_pat):
                 if file_path.is_file():
                     try:
                         code = file_path.read_text(encoding="utf-8")

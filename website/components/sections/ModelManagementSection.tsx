@@ -127,7 +127,7 @@ export default function ModelManagementSection() {
           className="text-center mb-16"
         >
           <h2 className="font-orbitron font-bold text-3xl md:text-5xl mb-4 bg-gradient-to-r from-[#00D4FF] to-[#7C3AED] bg-clip-text text-transparent">
-            27+ AI Models. Zero Cost. Intelligent Fallback.
+            Multi-Provider AI Models. Intelligent Fallback.
           </h2>
           <p className="text-lg text-[rgba(248,250,252,0.7)] max-w-3xl mx-auto">
             Free AI models have rate limits, go offline, and vary wildly in quality.

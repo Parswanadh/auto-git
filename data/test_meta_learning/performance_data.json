@@ -1,0 +1,195 @@
+{
+  "total_selections": 120,
+  "total_successes": 223,
+  "exploration_rate": 0.1,
+  "strategies": {
+    "strategy_a": {
+      "total_attempts": 26,
+      "successful_attempts": 23,
+      "total_quality_score": 195.5,
+      "total_latency": 130.0,
+      "total_tokens": 26000,
+      "alpha": 24.0,
+      "beta": 4.0,
+      "context_performance": {
+        "machine_learning_medium_code_generation": {
+          "attempts": 26,
+          "successes": 23,
+          "success_rate": 0.8846153846153846,
+          "avg_quality": 8.5,
+          "total_quality": 195.5
+        }
+      },
+      "last_used": 1769231928.7445486
+    },
+    "strategy_b": {
+      "total_attempts": 0,
+      "successful_attempts": 0,
+      "total_quality_score": 0.0,
+      "total_latency": 0.0,
+      "total_tokens": 0,
+      "alpha": 1.0,
+      "beta": 1.0,
+      "context_performance": {},
+      "last_used": 1769229658.040454
+    },
+    "strategy_c": {
+      "total_attempts": 0,
+      "successful_attempts": 0,
+      "total_quality_score": 0.0,
+      "total_latency": 0.0,
+      "total_tokens": 0,
+      "alpha": 1.0,
+      "beta": 1.0,
+      "context_performance": {},
+      "last_used": 1769229658.040454
+    },
+    "good_strategy": {
+      "total_attempts": 60,
+      "successful_attempts": 54,
+      "total_quality_score": 486.0,
+      "total_latency": 180.0,
+      "total_tokens": 30000,
+      "alpha": 55.0,
+      "beta": 7.0,
+      "context_performance": {
+        "test_domain_simple_test_task": {
+          "attempts": 60,
+          "successes": 54,
+          "success_rate": 0.9,
+          "avg_quality": 9.0,
+          "total_quality": 486.0
+        }
+      },
+      "last_used": 1769231928.7734694
+    },
+    "bad_strategy": {
+      "total_attempts": 60,
+      "successful_attempts": 12,
+      "total_quality_score": 60.0,
+      "total_latency": 300.0,
+      "total_tokens": 48000,
+      "alpha": 13.0,
+      "beta": 49.0,
+      "context_performance": {
+        "test_domain_simple_test_task": {
+          "attempts": 60,
+          "successes": 12,
+          "success_rate": 0.2,
+          "avg_quality": 5.0,
+          "total_quality": 60.0
+        }
+      },
+      "last_used": 1769231928.7744696
+    },
+    "strategy_x": {
+      "total_attempts": 60,
+      "successful_attempts": 30,
+      "total_quality_score": 255.0,
+      "total_latency": 330.0,
+      "total_tokens": 69000,
+      "alpha": 31.0,
+      "beta": 31.0,
+      "context_performance": {
+        "computer_vision_medium_code_generation": {
+          "attempts": 30,
+          "successes": 30,
+          "success_rate": 1.0,
+          "avg_quality": 8.5,
+          "total_quality": 255.0
+        },
+        "nlp_medium_code_generation": {
+          "attempts": 30,
+          "successes": 0,
+          "success_rate": 0.0,
+          "avg_quality": 0.0,
+          "total_quality": 0.0
+        }
+      },
+      "last_used": 1769231928.793401
+    },
+    "strategy_y": {
+      "total_attempts": 60,
+      "successful_attempts": 30,
+      "total_quality_score": 240.0,
+      "total_latency": 330.0,
+      "total_tokens": 69000,
+      "alpha": 31.0,
+      "beta": 31.0,
+      "context_performance": {
+        "computer_vision_medium_code_generation": {
+          "attempts": 30,
+          "successes": 0,
+          "success_rate": 0.0,
+          "avg_quality": 0.0,
+          "total_quality": 0.0
+        },
+        "nlp_medium_code_generation": {
+          "attempts": 30,
+          "successes": 30,
+          "success_rate": 1.0,
+          "avg_quality": 8.0,
+          "total_quality": 240.0
+        }
+      },
+      "last_used": 1769231928.793401
+    },
+    "strategy_1": {
+      "total_attempts": 81,
+      "successful_attempts": 70,
+      "total_quality_score": 560.0,
+      "total_latency": 810.0,
+      "total_tokens": 121500,
+      "alpha": 71.0,
+      "beta": 12.0,
+      "context_performance": {
+        "reinforcement_learning_complex_research": {
+          "attempts": 81,
+          "successes": 70,
+          "success_rate": 0.8641975308641975,
+          "avg_quality": 8.0,
+          "total_quality": 560.0
+        }
+      },
+      "last_used": 1769231928.8164883
+    },
+    "strategy_2": {
+      "total_attempts": 6,
+      "successful_attempts": 4,
+      "total_quality_score": 32.0,
+      "total_latency": 60.0,
+      "total_tokens": 9000,
+      "alpha": 5.0,
+      "beta": 3.0,
+      "context_performance": {
+        "reinforcement_learning_complex_research": {
+          "attempts": 6,
+          "successes": 4,
+          "success_rate": 0.6666666666666666,
+          "avg_quality": 8.0,
+          "total_quality": 32.0
+        }
+      },
+      "last_used": 1769231928.8164883
+    },
+    "strategy_3": {
+      "total_attempts": 3,
+      "successful_attempts": 0,
+      "total_quality_score": 0.0,
+      "total_latency": 30.0,
+      "total_tokens": 4500,
+      "alpha": 1.0,
+      "beta": 4.0,
+      "context_performance": {
+        "reinforcement_learning_complex_research": {
+          "attempts": 3,
+          "successes": 0,
+          "success_rate": 0.0,
+          "avg_quality": 0.0,
+          "total_quality": 0.0
+        }
+      },
+      "last_used": 1769229770.641182
+    }
+  }
+}

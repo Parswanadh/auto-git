@@ -95,7 +95,7 @@ class ErrorPatternDB:
         # ── Pattern 6: Missing f-string prefix ──────────────────────────
         self.register(ErrorPattern(
             name="missing_fstring",
-            signature_regex=r"SyntaxError::.*",
+            signature_regex=r"SyntaxError::.*(\{.*\}|f-string|f'|f\")",
             description="String with {var} but missing f prefix",
             fix_fn=self._fix_missing_fstring,
             priority=70,
@@ -316,7 +316,22 @@ class ErrorPatternDB:
                                 isinstance(d, ast.Name) and d.id == 'staticmethod'
                                 for d in item.decorator_list
                             )
-                            if not is_static:
+                            # Skip @classmethod (uses cls, not self)
+                            is_classmethod = any(
+                                isinstance(d, ast.Name) and d.id == 'classmethod'
+                                for d in item.decorator_list
+                            )
+                            if is_classmethod:
+                                line_idx = item.lineno - 1
+                                line = lines[line_idx]
+                                lines[line_idx] = re.sub(
+                                    r'def\s+' + re.escape(item.name) + r'\s*\(',
+                                    f'def {item.name}(cls, ',
+                                    line, count=1
+                                )
+                                lines[line_idx] = lines[line_idx].replace('cls, )', 'cls)')
+                                fixed = True
+                            elif not is_static:
                                 line_idx = item.lineno - 1
                                 line = lines[line_idx]
                                 # Add self as first parameter

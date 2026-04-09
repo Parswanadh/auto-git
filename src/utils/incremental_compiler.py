@@ -152,8 +152,14 @@ class IncrementalCompiler:
                 source_file = source_module + ".py"
                 if source_file in self.exported_symbols:
                     available = self.exported_symbols[source_file]
-                    # Check if the class has the method
-                    # (Our export extraction includes class methods as ClassName.method)
+                    # If obj_name is a known class in the source module,
+                    # allow any attribute access — we can't statically introspect
+                    # ORM columns, enum values, @property, __getattr__, metaclass
+                    # attrs, etc.  Only flag if the object is NOT a class.
+                    if obj_name in available:
+                        # obj_name is a known exported class/name — trust it
+                        continue
+                    # Check if the attr is a known export
                     if attr_name not in available and f"{obj_name}.{attr_name}" not in available:
                         result.missing_attrs.append(
                             f"Line {line_no}: {obj_name}.{attr_name}() — "
@@ -243,8 +249,10 @@ class IncrementalCompiler:
     def _extract_exports(self, code: str) -> Set[str]:
         """Extract all public names defined in a Python file.
         
-        Returns class names, function names, and top-level constants.
-        Also includes ClassName.method for public methods.
+        Returns class names, function names, top-level constants,
+        and class-level attributes (including SQLAlchemy columns,
+        enum values, and annotated assignments).
+        Also includes ClassName.attr for class-level attributes.
         """
         exports: Set[str] = set()
         
@@ -256,19 +264,30 @@ class IncrementalCompiler:
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
                 exports.add(node.name)
-                # Add public methods
                 for item in node.body:
+                    # Public methods
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         if not item.name.startswith('_') or item.name == '__init__':
                             exports.add(item.name)
                             exports.add(f"{node.name}.{item.name}")
+                    # Class-level assignments (e.g., ADMIN = "admin", owner_id = Column(...))
+                    elif isinstance(item, ast.Assign):
+                        for target in item.targets:
+                            if isinstance(target, ast.Name):
+                                exports.add(target.id)
+                                exports.add(f"{node.name}.{target.id}")
+                    # Annotated assignments (e.g., name: str = ..., id: int)
+                    elif isinstance(item, ast.AnnAssign):
+                        if isinstance(item.target, ast.Name):
+                            exports.add(item.target.id)
+                            exports.add(f"{node.name}.{item.target.id}")
             
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 exports.add(node.name)
             
             elif isinstance(node, ast.Assign):
                 for target in node.targets:
-                    if isinstance(target, ast.Name) and target.id.isupper():
+                    if isinstance(target, ast.Name):
                         exports.add(target.id)
             
             elif isinstance(node, ast.AnnAssign):
