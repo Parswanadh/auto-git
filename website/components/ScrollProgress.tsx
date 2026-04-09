@@ -2,20 +2,39 @@
 
 import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
+import { usePresentationMode } from '@/components/PresentationModeProvider';
 
 export default function ScrollProgress() {
+  const { motionTier } = usePresentationMode();
   const [scrollProgress, setScrollProgress] = useState(0);
 
   useEffect(() => {
-    const handleScroll = () => {
+    let ticking = false;
+
+    const updateProgress = () => {
       const totalHeight = document.documentElement.scrollHeight - window.innerHeight;
-      const progress = (window.scrollY / totalHeight) * 100;
+      const progress = totalHeight > 0 ? (window.scrollY / totalHeight) * 100 : 0;
       setScrollProgress(Math.min(progress, 100));
+      ticking = false;
     };
 
+    const handleScroll = () => {
+      if (ticking) {
+        return;
+      }
+
+      ticking = true;
+      window.requestAnimationFrame(updateProgress);
+    };
+
+    updateProgress();
     window.addEventListener('scroll', handleScroll, { passive: true });
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
+
+  if (motionTier === 'low') {
+    return <div className="fixed left-0 right-0 top-0 z-[60] h-[2px] bg-[rgba(148,163,184,0.5)]" aria-hidden />;
+  }
 
   return (
     <motion.div
@@ -28,8 +47,9 @@ export default function ScrollProgress() {
         className="h-full w-full"
         style={{
           background: 'linear-gradient(90deg, #00D4FF 0%, #7C3AED 50%, #10B981 100%)',
-          scaleX: scrollProgress / 100,
-          transformOrigin: 'left',
+          transform: `scaleX(${scrollProgress / 100})`,
+          transformOrigin: 'left center',
+          willChange: 'transform',
         }}
         transition={{ duration: 0.1 }}
       />

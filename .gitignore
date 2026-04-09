@@ -120,3 +120,5 @@ website-*.png
 
 # Keep lockfiles and source docs by default; ignore only generated docs if needed
 # docs/generated/
+.vercel
+.env*.local

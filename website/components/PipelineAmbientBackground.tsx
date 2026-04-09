@@ -2,6 +2,7 @@
 
 import { motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { usePresentationMode } from '@/components/PresentationModeProvider';
 
 type AmbientNode = {
   id: string;
@@ -55,14 +56,34 @@ const AMBIENT_EDGES: AmbientEdge[] = [
 ];
 
 export default function PipelineAmbientBackground() {
+  const { effectiveMode, motionTier } = usePresentationMode();
   const [activeEdges, setActiveEdges] = useState<Set<string>>(new Set());
+  const [isPageVisible, setIsPageVisible] = useState(true);
   const timeoutIdsRef = useRef<number[]>([]);
+  const animationEnabled = motionTier !== 'low';
+  const intervalMs = effectiveMode === 'frontier' ? 700 : 1200;
+  const edgeLifetimeMs = effectiveMode === 'frontier' ? 1100 : 800;
+  const burstChance = effectiveMode === 'frontier' ? 0.22 : 0.1;
 
   const nodeMap = useMemo(() => {
     return new Map(AMBIENT_NODES.map((node) => [node.id, node]));
   }, []);
 
   useEffect(() => {
+    const onVisibilityChange = () => setIsPageVisible(document.visibilityState === 'visible');
+
+    onVisibilityChange();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
+  useEffect(() => {
+    if (!animationEnabled || !isPageVisible) {
+      setActiveEdges(new Set());
+      return;
+    }
+
     const activate = () => {
       const edge = AMBIENT_EDGES[Math.floor(Math.random() * AMBIENT_EDGES.length)];
 
@@ -78,25 +99,65 @@ export default function PipelineAmbientBackground() {
           next.delete(edge.id);
           return next;
         });
-      }, 1100);
+      }, edgeLifetimeMs);
 
       timeoutIdsRef.current.push(timeoutId);
     };
 
     const intervalId = window.setInterval(() => {
-      const burst = Math.random() < 0.22 ? 2 : 1;
+      const burst = Math.random() < burstChance ? 2 : 1;
       for (let i = 0; i < burst; i += 1) {
         const t = window.setTimeout(activate, i * 200);
         timeoutIdsRef.current.push(t);
       }
-    }, 700);
+    }, intervalMs);
 
     return () => {
       window.clearInterval(intervalId);
       timeoutIdsRef.current.forEach((id) => window.clearTimeout(id));
       timeoutIdsRef.current = [];
     };
-  }, []);
+  }, [animationEnabled, isPageVisible, intervalMs, edgeLifetimeMs, burstChance]);
+
+  if (!animationEnabled) {
+    return (
+      <div className="pointer-events-none fixed inset-0 z-0 opacity-20" aria-hidden>
+        <svg viewBox="0 0 96 42" className="h-full w-full">
+          {AMBIENT_EDGES.map((edge) => {
+            const source = nodeMap.get(edge.source);
+            const target = nodeMap.get(edge.target);
+
+            if (!source || !target) {
+              return null;
+            }
+
+            return (
+              <line
+                key={edge.id}
+                x1={source.x}
+                y1={source.y}
+                x2={target.x}
+                y2={target.y}
+                stroke="rgba(71,85,105,0.35)"
+                strokeWidth={0.22}
+                strokeLinecap="round"
+              />
+            );
+          })}
+
+          {AMBIENT_NODES.map((node) => (
+            <circle
+              key={node.id}
+              cx={node.x}
+              cy={node.y}
+              r={0.34}
+              fill="rgba(148,163,184,0.35)"
+            />
+          ))}
+        </svg>
+      </div>
+    );
+  }
 
   return (
     <div className="pointer-events-none fixed inset-0 z-0 opacity-35" aria-hidden>

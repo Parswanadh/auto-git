@@ -1,9 +1,10 @@
 'use client';
 
+import React, { useRef } from 'react';
 import { motion, useInView } from 'framer-motion';
-import { useRef } from 'react';
 import CountUp from 'react-countup';
 import { EVIDENCE_AS_OF, evidenceMetrics, phaseGateSnapshot } from '@/data/evidenceMetrics';
+import { usePresentationMode } from '@/components/PresentationModeProvider';
 
 const pipelineMetrics = [
   { value: Number(evidenceMetrics.sourcePythonLoc.value), label: 'Python LOC in src', suffix: '', color: '#00D4FF' },
@@ -30,26 +31,32 @@ const infraMetrics = [
   { value: Number(evidenceMetrics.unitTestsCollected.value), label: 'Unit test coverage points', color: '#00D4FF' },
 ];
 
-function MetricCard({ value, label, suffix = '', prefix = '', color, delay }: {
-  value: number; label: string; suffix?: string; prefix?: string; color: string; delay: number;
+function MetricCard({ value, label, suffix = '', prefix = '', color, delay, isVisible, animateNumbers, durationFactor }: {
+  value: number;
+  label: string;
+  suffix?: string;
+  prefix?: string;
+  color: string;
+  delay: number;
+  isVisible: boolean;
+  animateNumbers: boolean;
+  durationFactor: number;
 }) {
-  const ref = useRef(null);
-  const isInView = useInView(ref, { once: true });
+  const displayValue = value.toLocaleString();
 
   return (
     <motion.div
-      ref={ref}
       initial={{ opacity: 0, y: 20 }}
-      animate={isInView ? { opacity: 1, y: 0 } : {}}
+      animate={isVisible ? { opacity: 1, y: 0 } : {}}
       transition={{ duration: 0.4, delay }}
-      className="bg-[rgba(3,7,18,0.8)] border border-[rgba(0,212,255,0.12)] rounded-xl p-5 text-center hover-lift"
+      className="bg-[rgba(3,7,18,0.8)] border border-[rgba(0,212,255,0.12)] rounded-lg md:rounded-xl p-3 sm:p-4 md:p-5 text-center hover-lift"
     >
-      <div className="text-3xl md:text-4xl font-bold font-orbitron mb-2" style={{ color }}>
+      <div className="text-2xl sm:text-3xl md:text-4xl font-bold font-orbitron mb-2" style={{ color }}>
         {prefix}
-        {isInView ? (
-          <CountUp end={value} duration={2} separator="," />
+        {isVisible && animateNumbers ? (
+          <CountUp end={value} duration={1.7 * durationFactor} separator="," />
         ) : (
-          '0'
+          displayValue
         )}
         {suffix}
       </div>
@@ -58,9 +65,12 @@ function MetricCard({ value, label, suffix = '', prefix = '', color, delay }: {
   );
 }
 
-export default function MetricsDashboard() {
+function MetricsDashboard() {
+  const { motionTier, effectiveMode } = usePresentationMode();
   const ref = useRef(null);
   const isInView = useInView(ref, { once: true, margin: '-100px' });
+  const animateNumbers = motionTier !== 'low';
+  const durationFactor = effectiveMode === 'evidence' ? 0.6 : 1;
 
   return (
     <section className="relative py-24 lg:py-32" ref={ref}>
@@ -97,9 +107,16 @@ export default function MetricsDashboard() {
         >
           Pipeline Metrics
         </motion.h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-12">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3 mb-8 sm:mb-12">
           {pipelineMetrics.map((m, i) => (
-            <MetricCard key={m.label} {...m} delay={0.1 + i * 0.08} />
+            <MetricCard
+              key={m.label}
+              {...m}
+              delay={0.1 + i * 0.08}
+              isVisible={isInView}
+              animateNumbers={animateNumbers}
+              durationFactor={durationFactor}
+            />
           ))}
         </div>
 
@@ -112,9 +129,16 @@ export default function MetricsDashboard() {
         >
           Quality Metrics
         </motion.h3>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-12">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3 mb-8 sm:mb-12">
           {qualityMetrics.map((m, i) => (
-            <MetricCard key={m.label} {...m} delay={0.5 + i * 0.08} />
+            <MetricCard
+              key={m.label}
+              {...m}
+              delay={0.5 + i * 0.08}
+              isVisible={isInView}
+              animateNumbers={animateNumbers}
+              durationFactor={durationFactor}
+            />
           ))}
         </div>
 
@@ -127,12 +151,21 @@ export default function MetricsDashboard() {
         >
           Infrastructure Metrics
         </motion.h3>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3">
           {infraMetrics.map((m, i) => (
-            <MetricCard key={m.label} {...m} delay={0.8 + i * 0.08} />
+            <MetricCard
+              key={m.label}
+              {...m}
+              delay={0.8 + i * 0.08}
+              isVisible={isInView}
+              animateNumbers={animateNumbers}
+              durationFactor={durationFactor}
+            />
           ))}
         </div>
       </div>
     </section>
   );
 }
+
+export default React.memo(MetricsDashboard);
