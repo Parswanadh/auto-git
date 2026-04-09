@@ -27,7 +27,7 @@ const RoadmapSection = dynamic(() => import('@/components/sections/RoadmapSectio
 
 export default function HomePage() {
   return (
-    <main className="relative min-h-screen bg-[#030712] w-full">
+    <main className="relative min-h-screen w-full sota-page-entry">
       {/* Navigation */}
       <Navigation />
 

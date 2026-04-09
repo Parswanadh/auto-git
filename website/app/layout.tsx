@@ -26,10 +26,20 @@ export default function RootLayout({
           <PipelineAmbientBackground />
 
           {/* Background effects */}
+          <div className="universe-backdrop" />
+          <div className="universe-nebula nebula-a" />
+          <div className="universe-nebula nebula-b" />
+          <div className="universe-nebula nebula-c" />
+          <div className="universe-aurora" />
           <div className="starfield" />
-          <div className="particle-background" />
           <div className="grid-background" />
-          <div className="scanline-effect" />
+
+          <div className="universe-meteors" aria-hidden="true">
+            <span className="meteor meteor-1" />
+            <span className="meteor meteor-2" />
+            <span className="meteor meteor-3" />
+            <span className="meteor meteor-4" />
+          </div>
 
           {/* Floating orbs for visual depth */}
           <div className="floating-orb orb-1" />

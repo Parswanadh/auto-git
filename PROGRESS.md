@@ -194,3 +194,132 @@ Result:
 4. Live slow auto-scroll demo capability implemented.
 5. Session fully documented in PROGRESS.md.
 
+---
+
+## Session 28 - Collapsible Controls + SOTA Universe Visual Pass
+
+**Date:** 2026-04-09  
+**Primary Goal:** Make demo mode and speed controls collapsible, increase auto-scroll speed range, upgrade background to a smoother universe theme, and improve entry animation quality.
+
+---
+
+## What Was Requested
+
+1. Make demo modes collapsible.
+2. Make speed controls collapsible.
+3. Increase speed range (current felt too slow).
+4. Apply SOTA-level smooth universe background styling.
+5. Upgrade entry animation quality.
+6. Continue with swarm + deep sequential reasoning and log all work.
+
+---
+
+## Research + Planning Method
+
+1. Ran deep sequential-thinking chain focused on implementation order, perf guardrails, and fallback behavior.
+2. Spawned parallel subagents for:
+	- cosmic visual pattern research
+	- file-level insertion mapping for current website codebase
+3. Consolidated recommendations into one implementation pass with motion-safe constraints.
+
+Key principles applied:
+
+1. Layered cosmic visuals (backdrop + nebula + aurora + sparse meteors) using transform/opacity animations only.
+2. Preserve reduced-motion and safe/evidence mode behavior.
+3. Keep demo controls compact and operable during live booth usage.
+
+---
+
+## Implementation Completed
+
+### 1. Collapsible Guided Demo Controller + Faster Speeds
+
+Updated file:
+
+1. `website/components/AutoScrollDemoController.tsx`
+
+Changes:
+
+1. Added animated panel open/close behavior (AnimatePresence + motion).
+2. Added collapsible **Demo Controls** section.
+3. Added collapsible **Speed Settings** section.
+4. Added speed preset buttons:
+	- Cine (22)
+	- Smooth (48)
+	- Expo (110)
+	- Fast (180)
+	- Turbo (240)
+5. Increased slider range:
+	- Previous: 15-80 px/s
+	- New: 12-260 px/s
+6. Persisted new collapse states in local storage.
+7. Updated autoplay tip to reflect fast expo-friendly URL speed.
+
+### 2. Collapsible Demo Modes Switcher
+
+Updated file:
+
+1. `website/components/PresentationModeSwitcher.tsx`
+
+Changes:
+
+1. Converted mode switcher into a compact floating trigger + collapsible panel.
+2. Added animated open/close transitions.
+3. Persisted open/closed state in local storage.
+4. Preserved all mode behavior and effective mode diagnostics.
+
+### 3. Universe Theme Background Overhaul
+
+Updated files:
+
+1. `website/app/layout.tsx`
+2. `website/app/globals.css`
+
+Changes:
+
+1. Added new global visual layers:
+	- `universe-backdrop`
+	- `universe-nebula` variants (`nebula-a`, `nebula-b`, `nebula-c`)
+	- `universe-aurora`
+	- `universe-meteors` with 4 animated meteor trails
+2. Rebalanced grid and starfield intensity for smoother cosmic depth.
+3. Added twinkle and drift keyframes for less static feel.
+4. Updated safe/evidence/reduced-motion selectors to disable or tone down new effects.
+5. Removed static feel from default body background with layered gradient base.
+
+### 4. Smoother Page Entry Animation
+
+Updated files:
+
+1. `website/app/globals.css`
+2. `website/app/page.tsx`
+
+Changes:
+
+1. Added `.sota-page-entry` utility with spring-like easing curve.
+2. Applied class to root page `<main>` for refined first-load entrance.
+3. Added reduced-motion bypass for this animation.
+
+---
+
+## Validation Run
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Next.js compile, lint/type checks, and static generation passed.
+
+---
+
+## Status After Session 28
+
+1. Demo mode controls are now collapsible.
+2. Speed controls are now collapsible.
+3. Auto-scroll speed range now supports significantly faster expo pacing.
+4. Background shifted from static blue bias to layered smooth universe theme.
+5. Entry motion quality improved with controlled, motion-safe transitions.
+

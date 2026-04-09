@@ -30,6 +30,12 @@ html {
 
 body {
   background-color: var(--color-background);
+  background-image:
+    radial-gradient(circle at 20% 15%, rgba(56, 189, 248, 0.18), transparent 34%),
+    radial-gradient(circle at 78% 8%, rgba(167, 139, 250, 0.18), transparent 38%),
+    radial-gradient(circle at 68% 72%, rgba(52, 211, 153, 0.12), transparent 40%),
+    linear-gradient(160deg, #030712 0%, #0a1023 45%, #02030a 100%);
+  background-attachment: fixed;
   color: var(--color-text);
   font-family: var(--font-rajdhani);
   overflow-x: hidden;
@@ -47,7 +53,15 @@ html[data-motion-tier='low'] {
 html[data-presentation-mode='safe'] .floating-orb,
 html[data-motion-tier='low'] .floating-orb,
 html[data-presentation-mode='safe'] .scanline-effect,
-html[data-motion-tier='low'] .scanline-effect {
+html[data-motion-tier='low'] .scanline-effect,
+html[data-presentation-mode='safe'] .universe-nebula,
+html[data-motion-tier='low'] .universe-nebula,
+html[data-presentation-mode='safe'] .universe-aurora,
+html[data-motion-tier='low'] .universe-aurora,
+html[data-presentation-mode='safe'] .universe-meteors,
+html[data-motion-tier='low'] .universe-meteors,
+html[data-presentation-mode='safe'] .meteor,
+html[data-motion-tier='low'] .meteor {
   animation: none !important;
   opacity: 0 !important;
 }
@@ -55,18 +69,25 @@ html[data-motion-tier='low'] .scanline-effect {
 html[data-presentation-mode='safe'] .starfield,
 html[data-motion-tier='low'] .starfield,
 html[data-presentation-mode='safe'] .grid-background,
-html[data-motion-tier='low'] .grid-background {
+html[data-motion-tier='low'] .grid-background,
+html[data-presentation-mode='safe'] .universe-backdrop,
+html[data-motion-tier='low'] .universe-backdrop {
   animation: none !important;
   opacity: 0.12 !important;
 }
 
 html[data-presentation-mode='evidence'] .floating-orb {
-  filter: blur(56px);
-  opacity: 0.18;
+  filter: blur(60px);
+  opacity: 0.12;
 }
 
 html[data-presentation-mode='evidence'] .scanline-effect {
-  opacity: 0.45;
+  opacity: 0.2;
+}
+
+html[data-presentation-mode='evidence'] .universe-meteors,
+html[data-presentation-mode='evidence'] .meteor {
+  opacity: 0.2;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -81,8 +102,14 @@ html[data-presentation-mode='evidence'] .scanline-effect {
 
   .floating-orb,
   .scanline-effect,
+  .universe-nebula,
+  .universe-aurora,
+  .universe-meteors,
+  .meteor,
   .starfield,
-  .grid-background {
+  .grid-background,
+  .universe-backdrop,
+  .sota-page-entry {
     animation: none !important;
   }
 }
@@ -119,6 +146,117 @@ section {
 
 /* REMOVED - Particles were too big and ugly */
 
+/* Universe backdrop layers */
+.universe-backdrop {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(circle at 15% 20%, rgba(56, 189, 248, 0.2), transparent 35%),
+    radial-gradient(circle at 80% 12%, rgba(167, 139, 250, 0.22), transparent 38%),
+    radial-gradient(circle at 68% 70%, rgba(74, 222, 128, 0.14), transparent 42%),
+    radial-gradient(circle at 38% 86%, rgba(244, 114, 182, 0.12), transparent 35%),
+    linear-gradient(165deg, rgba(2, 6, 23, 0.96), rgba(10, 17, 38, 0.95) 48%, rgba(1, 4, 15, 0.98));
+  animation: bgShift 24s ease-in-out infinite;
+}
+
+.universe-nebula {
+  position: fixed;
+  width: 70vmax;
+  height: 70vmax;
+  border-radius: 50%;
+  filter: blur(90px);
+  mix-blend-mode: screen;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.33;
+  animation: nebulaDrift 34s ease-in-out infinite;
+}
+
+.nebula-a {
+  top: -16vmax;
+  left: -14vmax;
+  background: radial-gradient(circle, rgba(34, 211, 238, 0.36) 0%, rgba(14, 116, 144, 0.18) 35%, transparent 72%);
+  animation-delay: 0s;
+}
+
+.nebula-b {
+  top: 38%;
+  right: -18vmax;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.34) 0%, rgba(99, 102, 241, 0.2) 36%, transparent 74%);
+  animation-delay: -9s;
+}
+
+.nebula-c {
+  bottom: -20vmax;
+  left: 28%;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.28) 0%, rgba(20, 184, 166, 0.14) 35%, transparent 72%);
+  animation-delay: -18s;
+}
+
+.universe-aurora {
+  position: fixed;
+  inset: -25%;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.24;
+  filter: blur(56px) saturate(112%);
+  background:
+    conic-gradient(from 210deg at 62% 42%, rgba(34, 211, 238, 0.34), rgba(139, 92, 246, 0.26), rgba(45, 212, 191, 0.28), rgba(244, 114, 182, 0.2), rgba(34, 211, 238, 0.34));
+  transform-origin: 50% 50%;
+  animation: auroraShift 38s ease-in-out infinite;
+}
+
+.universe-meteors {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  overflow: hidden;
+  opacity: 0.55;
+}
+
+.meteor {
+  position: absolute;
+  width: 220px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0), rgba(224, 242, 254, 0.95), rgba(56, 189, 248, 0.72), rgba(56, 189, 248, 0));
+  filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.6));
+  transform: rotate(-24deg);
+  opacity: 0;
+  animation: meteorFly 11s linear infinite;
+}
+
+.meteor-1 {
+  top: 12%;
+  left: -30%;
+  animation-delay: 0s;
+  animation-duration: 9.8s;
+}
+
+.meteor-2 {
+  top: 28%;
+  left: -24%;
+  animation-delay: 2.6s;
+  animation-duration: 12.3s;
+}
+
+.meteor-3 {
+  top: 54%;
+  left: -35%;
+  animation-delay: 5.2s;
+  animation-duration: 13.6s;
+}
+
+.meteor-4 {
+  top: 72%;
+  left: -28%;
+  animation-delay: 7.4s;
+  animation-duration: 11.2s;
+}
+
 @keyframes particleFloat {
   0% {
     background-position: 0% 0%, 100% 100%, 50% 50%, 80% 10%, 10% 80%, 90% 40%, 40% 20%;
@@ -152,19 +290,19 @@ section {
   pointer-events: none;
   z-index: 0;
   background-image:
-    linear-gradient(rgba(0, 212, 255, 0.15) 1.5px, transparent 1.5px),
-    linear-gradient(90deg, rgba(0, 212, 255, 0.15) 1.5px, transparent 1.5px);
+    linear-gradient(rgba(56, 189, 248, 0.09) 1.5px, transparent 1.5px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.09) 1.5px, transparent 1.5px);
   background-size: 50px 50px;
   mask-image: radial-gradient(ellipse 80% 50% at 50% 50%, black 40%, transparent 100%);
-  animation: gridPulse 8s ease-in-out infinite;
+  animation: gridPulse 10s ease-in-out infinite;
 }
 
 @keyframes gridPulse {
   0%, 100% {
-    opacity: 0.15;
+    opacity: 0.12;
   }
   50% {
-    opacity: 0.25;
+    opacity: 0.2;
   }
 }
 
@@ -279,7 +417,7 @@ section {
     radial-gradient(2px 2px at 40% 90%, rgba(16, 185, 129, 0.5) 0%, transparent 70%),
     radial-gradient(2px 2px at 60% 10%, rgba(245, 158, 11, 0.5) 0%, transparent 70%);
   background-size: 200% 200%;
-  animation: starfield 40s ease-in-out infinite;
+  animation: starfield 42s ease-in-out infinite, twinkleShift 9.5s ease-in-out infinite;
 }
 
 @keyframes starfield {
@@ -293,12 +431,64 @@ section {
   }
 }
 
+@keyframes twinkleShift {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+
 @keyframes scanline {
   0% {
     transform: translateY(0);
   }
   100% {
     transform: translateY(4px);
+  }
+}
+
+@keyframes nebulaDrift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  33% {
+    transform: translate3d(3vw, -2vh, 0) scale(1.08);
+  }
+  66% {
+    transform: translate3d(-2vw, 3vh, 0) scale(0.94);
+  }
+}
+
+@keyframes auroraShift {
+  0%,
+  100% {
+    transform: rotate(0deg) scale(1);
+    opacity: 0.2;
+  }
+  50% {
+    transform: rotate(11deg) scale(1.08);
+    opacity: 0.32;
+  }
+}
+
+@keyframes meteorFly {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(-24deg);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.95;
+  }
+  62% {
+    opacity: 0.82;
+  }
+  100% {
+    transform: translate3d(145vw, 86vh, 0) rotate(-24deg);
+    opacity: 0;
   }
 }
 
@@ -634,4 +824,21 @@ section {
 
 .hover-bounce:hover {
   animation: subtleBounce 0.5s ease infinite;
+}
+
+@keyframes sotaPageEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.992);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+.sota-page-entry {
+  animation: sotaPageEnter 0.72s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
