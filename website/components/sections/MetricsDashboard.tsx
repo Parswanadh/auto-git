@@ -40,6 +40,19 @@ const outputRunVolumeMetrics = [
   { value: Number(evidenceMetrics.outputPytestLogs.value), label: 'Pytest log files', color: '#3B82F6' },
 ];
 
+const outputCorpusMetrics = [
+  { value: Number(evidenceMetrics.outputTopLevelDirs.value), label: 'Output project directories', color: '#22D3EE' },
+  { value: Number(evidenceMetrics.outputTopLevelTestDirs.value), label: 'Test-oriented output directories', color: '#38BDF8' },
+  { value: Number(evidenceMetrics.outputTotalFiles.value), label: 'Files under output/', color: '#A78BFA' },
+  { value: Number(evidenceMetrics.outputTestFiles.value), label: 'Test-related output files', color: '#10B981' },
+  { value: Number(evidenceMetrics.outputResearchReports.value), label: 'Research reports in output/', color: '#F59E0B' },
+  { value: Number(evidenceMetrics.outputPythonFiles.value), label: 'Python files in output/', color: '#3B82F6' },
+  { value: Number(evidenceMetrics.outputMarkdownFiles.value), label: 'Markdown files in output/', color: '#F97316' },
+  { value: Number(evidenceMetrics.outputJsonFiles.value), label: 'JSON files in output/', color: '#14B8A6' },
+  { value: Number(evidenceMetrics.outputE2EJson.value), label: 'E2E JSON snapshots in output/', color: '#8B5CF6' },
+  { value: Number(evidenceMetrics.outputBenchmarkFiles.value), label: 'Benchmark files in output/', color: '#60A5FA' },
+];
+
 function MetricCard({ value, label, suffix = '', prefix = '', color, delay, isVisible, animateNumbers, durationFactor }: {
   value: number;
   label: string;
@@ -207,6 +220,24 @@ function MetricsDashboard() {
                     label={m.label}
                     color={m.color}
                     delay={1.12 + i * 0.06}
+                    isVisible={isInView}
+                    animateNumbers={animateNumbers}
+                    durationFactor={durationFactor}
+                  />
+                ))}
+              </div>
+
+              <p className="mt-5 text-xs text-[rgba(248,250,252,0.6)]">
+                Output corpus summary from output/ includes generated projects, reports, and test artifacts captured across runs.
+              </p>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-3">
+                {outputCorpusMetrics.map((m, i) => (
+                  <MetricCard
+                    key={m.label}
+                    value={m.value}
+                    label={m.label}
+                    color={m.color}
+                    delay={1.26 + i * 0.05}
                     isVisible={isInView}
                     animateNumbers={animateNumbers}
                     durationFactor={durationFactor}

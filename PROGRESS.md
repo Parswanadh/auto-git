@@ -581,3 +581,66 @@ Result:
 2. Type/lint checks passed.
 3. Static prerender passed.
 
+---
+
+## Session 32 - Output Folder Test Corpus Summary On Website
+
+**Date:** 2026-04-10  
+**Primary Goal:** Add a clear website summary of the large output/ test corpus so judges can see total generated artifacts and test-related volume from output path directly.
+
+---
+
+## What Was Requested
+
+1. Use data from `output/` path where many tests/runs exist.
+2. Show this summary on the website.
+
+---
+
+## Implementation Completed
+
+### 1. Added Output Corpus Metrics To Evidence Model
+
+Updated file:
+
+1. `website/data/evidenceMetrics.ts`
+
+Added metrics sourced from recursive `output/` scans:
+
+1. Output top-level directories: `60`
+2. Test-oriented output directories: `8`
+3. Total files under `output/`: `1067`
+4. Test-related output files: `107`
+5. Research reports: `69`
+6. Python files: `552`
+7. Markdown files: `204`
+8. JSON files: `23`
+9. E2E JSON snapshots: `2`
+10. Benchmark files: `2`
+
+### 2. Rendered New Output Corpus Summary In Website Metrics
+
+Updated file:
+
+1. `website/components/sections/MetricsDashboard.tsx`
+
+Changes:
+
+1. Added `outputCorpusMetrics` card set.
+2. Extended the existing Output/Test panel with a second summary grid for `output/` corpus stats.
+3. Added explanatory text clarifying these numbers come from generated output artifacts across runs.
+
+---
+
+## Validation
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Type/lint checks passed.
+3. Static generation succeeded.
+
