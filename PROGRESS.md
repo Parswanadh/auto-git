@@ -688,3 +688,43 @@ Outcome:
 	- Executed test run ledger
 	- Output corpus summary metrics from `output/`
 
+---
+
+## Session 34 - Run Count Clarity In Evolution Section
+
+**Date:** 2026-04-10  
+**Primary Goal:** Fix confusion where the evolution headline implied only 27 total runs.
+
+---
+
+## What Was Updated
+
+Updated file:
+
+1. `website/components/sections/EvolutionSection.tsx`
+
+Changes:
+
+1. Replaced static headline text with dynamic context:
+	- `69 Tracked Run Artifacts. 27 Historical Core Runs.`
+2. Added summary chips for:
+	- historical chart runs
+	- tracked run artifacts
+	- output/test artifacts
+	- executed benchmark-ledger artifacts
+3. Clarified chart/table labels to explicitly say historical run data.
+4. Kept the original 27-pass visualization intact while making current run volume explicit.
+
+---
+
+## Validation
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Static generation passed.
+

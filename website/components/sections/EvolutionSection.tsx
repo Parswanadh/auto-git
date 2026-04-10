@@ -13,6 +13,7 @@ import {
   Cell,
   ReferenceLine,
 } from 'recharts';
+import { evidenceMetrics, executedTestRunLedger } from '@/data/evidenceMetrics';
 
 const locData = [
   { pass: 1, lines: 712, date: 'Feb 22', label: '' },
@@ -117,6 +118,10 @@ export default function EvolutionSection() {
   const ref = useRef(null);
   const isInView = useInView(ref, { once: true, margin: '-100px' });
   const [showTable, setShowTable] = useState(false);
+  const historicalRunCount = locData.length;
+  const trackedRunArtifacts = Number(evidenceMetrics.runArtifactsTracked.value);
+  const outputTestVolume = Number(evidenceMetrics.outputTestRunVolumeTotal.value);
+  const ledgerArtifacts = executedTestRunLedger.length;
 
   return (
     <section className="relative py-24 lg:py-32" ref={ref}>
@@ -129,11 +134,25 @@ export default function EvolutionSection() {
           className="text-center mb-16"
         >
           <h2 className="font-orbitron font-bold text-3xl md:text-5xl mb-4 bg-gradient-to-r from-[#00D4FF] to-[#7C3AED] bg-clip-text text-transparent">
-            27 Runs. 5 Days. From Broken to Production.
+            {trackedRunArtifacts.toLocaleString()} Tracked Run Artifacts. {historicalRunCount} Historical Core Runs.
           </h2>
           <p className="text-lg text-[rgba(248,250,252,0.7)] max-w-3xl mx-auto">
-            Real data from 27 pipeline iterations showing measurable improvement over time.
+            The chart below preserves the original {historicalRunCount}-pass evolution arc. Current evidence now tracks {trackedRunArtifacts} run artifacts, {outputTestVolume} output/test artifacts, and {ledgerArtifacts} benchmark-ledger artifacts.
           </p>
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs text-[rgba(248,250,252,0.85)]">
+            <span className="rounded-full border border-[rgba(34,211,238,0.35)] bg-[rgba(34,211,238,0.12)] px-3 py-1">
+              Historical chart runs: {historicalRunCount}
+            </span>
+            <span className="rounded-full border border-[rgba(16,185,129,0.35)] bg-[rgba(16,185,129,0.12)] px-3 py-1">
+              Tracked run artifacts: {trackedRunArtifacts}
+            </span>
+            <span className="rounded-full border border-[rgba(59,130,246,0.35)] bg-[rgba(59,130,246,0.12)] px-3 py-1">
+              Output/test artifacts: {outputTestVolume}
+            </span>
+            <span className="rounded-full border border-[rgba(167,139,250,0.35)] bg-[rgba(167,139,250,0.12)] px-3 py-1">
+              Executed run ledger artifacts: {ledgerArtifacts}
+            </span>
+          </div>
         </motion.div>
 
         {/* LOC Bar Chart */}
@@ -144,7 +163,7 @@ export default function EvolutionSection() {
           className="bg-[rgba(3,7,18,0.8)] border border-[rgba(0,212,255,0.15)] rounded-xl p-6 mb-12"
         >
           <h3 className="font-orbitron font-semibold text-[#00D4FF] text-lg mb-6 text-center">
-            Lines of Code Generated Per Run
+            Lines of Code Generated Per Historical Run
           </h3>
           <div className="h-80">
             <ResponsiveContainer width="100%" height="100%">
@@ -154,7 +173,7 @@ export default function EvolutionSection() {
                   dataKey="pass"
                   stroke="rgba(248,250,252,0.4)"
                   tick={{ fill: 'rgba(248,250,252,0.5)', fontSize: 11 }}
-                  label={{ value: 'Pass Number', position: 'bottom', fill: 'rgba(248,250,252,0.4)', fontSize: 12, offset: 15 }}
+                  label={{ value: 'Historical pass number', position: 'bottom', fill: 'rgba(248,250,252,0.4)', fontSize: 12, offset: 15 }}
                 />
                 <YAxis
                   stroke="rgba(248,250,252,0.4)"
@@ -206,7 +225,7 @@ export default function EvolutionSection() {
                     className="h-full rounded-full"
                     style={{ backgroundColor: b.color }}
                     initial={{ width: '0%' }}
-                    animate={isInView ? { width: b.fixed === 'Open' ? '95%' : `${(parseInt(b.fixed.replace('Pass ', '')) / 27) * 100}%` } : {}}
+                    animate={isInView ? { width: b.fixed === 'Open' ? '95%' : `${(parseInt(b.fixed.replace('Pass ', '')) / historicalRunCount) * 100}%` } : {}}
                     transition={{ duration: 0.8, delay: 0.6 + i * 0.06 }}
                   />
                 </div>
@@ -261,7 +280,7 @@ export default function EvolutionSection() {
             onClick={() => setShowTable(!showTable)}
             className="font-orbitron text-sm font-semibold px-6 py-3 rounded-lg bg-[rgba(0,212,255,0.1)] border border-[rgba(0,212,255,0.3)] text-[#00D4FF] hover:bg-[rgba(0,212,255,0.2)] transition-colors"
           >
-            {showTable ? 'Hide' : 'Show'} Complete Run History
+            {showTable ? 'Hide' : 'Show'} Historical 27-Run Table
           </button>
         </div>
 
@@ -275,7 +294,7 @@ export default function EvolutionSection() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-[rgba(0,212,255,0.2)]">
-                  <th className="p-3 text-left text-[#00D4FF] font-orbitron text-xs">Pass</th>
+                  <th className="p-3 text-left text-[#00D4FF] font-orbitron text-xs">Historical Pass</th>
                   <th className="p-3 text-left text-[#00D4FF] font-orbitron text-xs">Project</th>
                   <th className="p-3 text-center text-[#00D4FF] font-orbitron text-xs">Date</th>
                   <th className="p-3 text-center text-[#00D4FF] font-orbitron text-xs">Files</th>
