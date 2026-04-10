@@ -429,3 +429,89 @@ Result:
 3. Cosmic depth improved via layered starfield and vignette treatment.
 4. Motion fallbacks remain preserved for evidence/safe/reduced-motion scenarios.
 
+---
+
+## Session 30 - Judge-Default UX + Large Testing Volume Showcase
+
+**Date:** 2026-04-10  
+**Primary Goal:** Ship a judge-first website update that removes user mode selection, defaults to evidence/judge behavior, and visibly showcases large historical testing/output volume.
+
+---
+
+## What Was Requested
+
+1. Update the website and push to git.
+2. Remove mode options from the UI.
+3. Keep judge mode as the default behavior.
+4. Ensure collapsible interactions remain available where needed.
+5. Showcase "huge testings" clearly in website metrics.
+
+---
+
+## Implementation Completed
+
+### 1. Judge-Default Presentation Path (No User Mode Switching)
+
+Updated files:
+
+1. `website/components/PresentationModeProvider.tsx`
+2. `website/app/layout.tsx`
+3. `website/components/Navigation.tsx`
+
+Changes:
+
+1. Locked default mode to evidence/judge (`DEFAULT_MODE = 'evidence'`).
+2. Disabled external mode switching in provider while preserving reduced-motion fallback to safe mode.
+3. Removed mounted mode switcher from layout.
+4. Updated nav badge language to "Judge Mode" and removed mode-driven style branching.
+
+### 2. Large Output/Test-Run Volume Metrics
+
+Updated files:
+
+1. `website/data/evidenceMetrics.ts`
+2. `website/components/sections/MetricsDashboard.tsx`
+3. `website/components/TrustBadges.tsx`
+4. `website/components/sections/HeroSection.tsx`
+
+Changes:
+
+1. Added output/testing evidence metrics:
+	- run artifacts tracked: 69
+	- checkpoint files: 82
+	- pipeline trace files: 189
+	- E2E logs: 12
+	- pytest logs: 2
+	- total output/test-run artifacts: 354
+2. Added collapsible "Output and Test Run Volume" section in metrics dashboard.
+3. Promoted testing volume above the fold in trust badges and hero evidence chips/stats.
+
+---
+
+## Validation
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Type/lint checks passed.
+3. Static generation passed.
+
+---
+
+## Git Publish Status
+
+1. Commit: `61115d7`
+2. Message: `feat(website): default judge mode and showcase testing volume`
+3. Branch: `master`
+4. Push: completed to `origin/master`
+
+---
+
+## Notes
+
+1. A pre-existing local modification in `website/package-lock.json` remains unstaged/uncommitted intentionally.
+
