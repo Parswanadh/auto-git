@@ -59,6 +59,7 @@ export default function HeroSection() {
   const stats = [
     { value: String(evidenceMetrics.pipelineNodes.value), label: 'Pipeline nodes', icon: '⚙️' },
     { value: String(evidenceMetrics.unitTestsCollected.value), label: 'Collected unit tests', icon: '🧪' },
+    { value: String(evidenceMetrics.outputTestRunVolumeTotal.value), label: 'Output/test-run artifacts', icon: '📈' },
     { value: String(evidenceMetrics.sourcePythonLoc.value), label: 'Python LOC in src', icon: '💻' },
     { value: String(evidenceMetrics.errorMemoryEntries.value), label: 'Error-memory entries', icon: '🧠' },
   ];
@@ -66,6 +67,7 @@ export default function HeroSection() {
   const evidencePills = [
     `${evidenceMetrics.pipelineNodes.value}-node orchestrated pipeline`,
     `${evidenceMetrics.unitTestsCollected.value} collected unit tests`,
+    `${evidenceMetrics.outputTestRunVolumeTotal.value} output/test artifacts logged`,
     `${evidenceMetrics.errorMemoryEntries.value} error-memory entries`,
   ];
 

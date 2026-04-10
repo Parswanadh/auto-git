@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { motion, useInView } from 'framer-motion';
 import CountUp from 'react-countup';
 import { EVIDENCE_AS_OF, evidenceMetrics, phaseGateSnapshot } from '@/data/evidenceMetrics';
@@ -29,6 +29,15 @@ const infraMetrics = [
   { value: 4, label: 'Model profiles', color: '#10B981' },
   { value: Number(evidenceMetrics.runArtifactsTracked.value), label: 'Traceable run artifacts', color: '#F59E0B' },
   { value: Number(evidenceMetrics.unitTestsCollected.value), label: 'Unit test coverage points', color: '#00D4FF' },
+];
+
+const outputRunVolumeMetrics = [
+  { value: Number(evidenceMetrics.outputTestRunVolumeTotal.value), label: 'Total output/test-run artifacts', color: '#22D3EE' },
+  { value: Number(evidenceMetrics.runArtifactsTracked.value), label: 'Run JSON artifacts', color: '#38BDF8' },
+  { value: Number(evidenceMetrics.outputCheckpointFiles.value), label: 'Checkpoint snapshots', color: '#A78BFA' },
+  { value: Number(evidenceMetrics.outputPipelineTraceFiles.value), label: 'Pipeline trace files', color: '#10B981' },
+  { value: Number(evidenceMetrics.outputE2ELogs.value), label: 'E2E log files', color: '#F59E0B' },
+  { value: Number(evidenceMetrics.outputPytestLogs.value), label: 'Pytest log files', color: '#3B82F6' },
 ];
 
 function MetricCard({ value, label, suffix = '', prefix = '', color, delay, isVisible, animateNumbers, durationFactor }: {
@@ -68,6 +77,7 @@ function MetricCard({ value, label, suffix = '', prefix = '', color, delay, isVi
 function MetricsDashboard() {
   const { motionTier, effectiveMode } = usePresentationMode();
   const ref = useRef(null);
+  const [outputPanelOpen, setOutputPanelOpen] = useState(true);
   const isInView = useInView(ref, { once: true, margin: '-100px' });
   const animateNumbers = motionTier !== 'low';
   const durationFactor = effectiveMode === 'evidence' ? 0.6 : 1;
@@ -163,6 +173,49 @@ function MetricsDashboard() {
             />
           ))}
         </div>
+
+        {/* Output/Test Run Volume */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={isInView ? { opacity: 1, y: 0 } : {}}
+          transition={{ delay: 1.05, duration: 0.45 }}
+          className="mt-8 rounded-xl border border-[rgba(34,211,238,0.22)] bg-[rgba(2,6,23,0.72)] p-4 sm:p-5"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-orbitron font-semibold text-sm uppercase tracking-widest text-[rgba(248,250,252,0.7)]">
+              Output and Test Run Volume
+            </h3>
+            <button
+              type="button"
+              onClick={() => setOutputPanelOpen((prev) => !prev)}
+              className="rounded-lg border border-[rgba(56,189,248,0.4)] bg-[rgba(56,189,248,0.12)] px-3 py-1.5 text-xs font-semibold text-cyan-200 transition-colors hover:bg-[rgba(56,189,248,0.22)]"
+            >
+              {outputPanelOpen ? 'Collapse' : 'Expand'}
+            </button>
+          </div>
+
+          {outputPanelOpen && (
+            <>
+              <p className="mt-2 text-xs text-[rgba(248,250,252,0.6)]">
+                Large historical run volume is now surfaced directly in the graph: run results, checkpoints, traces, and test logs.
+              </p>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 sm:gap-3">
+                {outputRunVolumeMetrics.map((m, i) => (
+                  <MetricCard
+                    key={m.label}
+                    value={m.value}
+                    label={m.label}
+                    color={m.color}
+                    delay={1.12 + i * 0.06}
+                    isVisible={isInView}
+                    animateNumbers={animateNumbers}
+                    durationFactor={durationFactor}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </motion.div>
       </div>
     </section>
   );

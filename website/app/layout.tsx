@@ -4,7 +4,6 @@ import PipelineAmbientBackground from "@/components/PipelineAmbientBackground";
 import VerificationBadge from "@/components/VerificationBadge";
 import ScrollProgress from "@/components/ScrollProgress";
 import PresentationModeProvider from "@/components/PresentationModeProvider";
-import PresentationModeSwitcher from "@/components/PresentationModeSwitcher";
 import AutoScrollDemoController from "@/components/AutoScrollDemoController";
 
 export const metadata: Metadata = {
@@ -61,7 +60,6 @@ export default function RootLayout({
           {children}
 
           <VerificationBadge />
-          <PresentationModeSwitcher />
           <AutoScrollDemoController />
         </PresentationModeProvider>
       </body>

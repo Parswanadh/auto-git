@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { usePresentationMode } from '@/components/PresentationModeProvider';
 
 const navItems = [
   { name: 'Home', href: '#hero' },
@@ -16,7 +15,6 @@ const navItems = [
 ];
 
 export default function Navigation() {
-  const { effectiveMode } = usePresentationMode();
   const [isOpen, setIsOpen] = useState(false);
   const [activeSection, setActiveSection] = useState('hero');
 
@@ -41,11 +39,7 @@ export default function Navigation() {
 
   return (
     <motion.nav
-      className={`fixed top-0 left-0 right-0 z-50 backdrop-blur-md border-b ${
-        effectiveMode === 'evidence'
-          ? 'bg-[rgba(2,6,23,0.96)] border-[rgba(14,165,233,0.35)] shadow-[0_8px_30px_rgba(14,165,233,0.12)]'
-          : 'bg-[rgba(3,7,18,0.9)] border-[rgba(0,212,255,0.1)]'
-      }`}
+      className="fixed top-0 left-0 right-0 z-50 border-b border-[rgba(14,165,233,0.35)] bg-[rgba(2,6,23,0.96)] backdrop-blur-md shadow-[0_8px_30px_rgba(14,165,233,0.12)]"
       initial={{ y: -100 }}
       animate={{ y: 0 }}
       transition={{ duration: 0.5, ease: 'easeOut' }}
@@ -55,11 +49,9 @@ export default function Navigation() {
           {/* Logo with subtle glow on hover */}
           <motion.div className="flex items-center gap-2" whileHover={{ scale: 1.03 }} transition={{ duration: 0.2 }}>
             <span className="font-orbitron font-bold text-xl text-[#00D4FF]">Auto-GIT</span>
-            {effectiveMode === 'evidence' && (
-              <span className="rounded-md border border-[rgba(14,165,233,0.4)] bg-[rgba(14,165,233,0.14)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.11em] text-sky-200">
-                Evidence Mode
-              </span>
-            )}
+            <span className="rounded-md border border-[rgba(14,165,233,0.4)] bg-[rgba(14,165,233,0.14)] px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.11em] text-sky-200">
+              Judge Mode
+            </span>
           </motion.div>
 
           {/* Desktop nav with hover effects */}

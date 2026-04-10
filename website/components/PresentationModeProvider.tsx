@@ -1,6 +1,7 @@
 'use client';
 
 import {
+  useCallback,
   createContext,
   type Dispatch,
   type ReactNode,
@@ -22,27 +23,9 @@ type PresentationModeContextValue = {
   setSelectedMode: Dispatch<SetStateAction<PresentationMode>>;
 };
 
-const STORAGE_KEY = 'autogit:presentation-mode';
-const MODE_SET = new Set<PresentationMode>(['frontier', 'evidence', 'safe']);
+const DEFAULT_MODE: PresentationMode = 'evidence';
 
 const PresentationModeContext = createContext<PresentationModeContextValue | null>(null);
-
-function parseMode(value: string | null | undefined): PresentationMode | null {
-  if (!value) {
-    return null;
-  }
-
-  return MODE_SET.has(value as PresentationMode) ? (value as PresentationMode) : null;
-}
-
-function readInitialModeFromUrl(): PresentationMode | null {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-
-  const value = new URLSearchParams(window.location.search).get('mode');
-  return parseMode(value);
-}
 
 function hasConstrainedDeviceProfile(): boolean {
   if (typeof window === 'undefined') {
@@ -70,25 +53,13 @@ function getMotionTier(effectiveMode: PresentationMode, reducedMotion: boolean):
 }
 
 export default function PresentationModeProvider({ children }: { children: ReactNode }) {
-  const [selectedMode, setSelectedMode] = useState<PresentationMode>('frontier');
+  const [selectedMode] = useState<PresentationMode>(DEFAULT_MODE);
   const [reducedMotion, setReducedMotion] = useState(false);
 
-  useEffect(() => {
-    const modeFromUrl = readInitialModeFromUrl();
-    if (modeFromUrl) {
-      setSelectedMode(modeFromUrl);
-      return;
-    }
-
-    const modeFromStorage = parseMode(window.localStorage.getItem(STORAGE_KEY));
-    if (modeFromStorage) {
-      setSelectedMode(modeFromStorage);
-    }
+  // Mode switching is intentionally disabled; site defaults to judge/evidence mode.
+  const setSelectedMode = useCallback<Dispatch<SetStateAction<PresentationMode>>>(() => {
+    return;
   }, []);
-
-  useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, selectedMode);
-  }, [selectedMode]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -101,12 +72,12 @@ export default function PresentationModeProvider({ children }: { children: React
   }, []);
 
   const effectiveMode: PresentationMode = useMemo(() => {
-    if (selectedMode === 'safe' || reducedMotion) {
+    if (reducedMotion) {
       return 'safe';
     }
 
-    return selectedMode;
-  }, [selectedMode, reducedMotion]);
+    return DEFAULT_MODE;
+  }, [reducedMotion]);
 
   const motionTier = useMemo(() => getMotionTier(effectiveMode, reducedMotion), [effectiveMode, reducedMotion]);
 
@@ -125,7 +96,7 @@ export default function PresentationModeProvider({ children }: { children: React
       reducedMotion,
       setSelectedMode,
     }),
-    [selectedMode, effectiveMode, motionTier, reducedMotion],
+    [selectedMode, effectiveMode, motionTier, reducedMotion, setSelectedMode],
   );
 
   return <PresentationModeContext.Provider value={value}>{children}</PresentationModeContext.Provider>;

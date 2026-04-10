@@ -24,6 +24,11 @@ const badges = [
     text: `${evidenceMetrics.unitTestsCollected.value} Unit Tests Collected`,
     color: '#F59E0B',
   },
+  {
+    icon: '📊',
+    text: `${evidenceMetrics.outputTestRunVolumeTotal.value} Output/Test Artifacts Logged`,
+    color: '#22D3EE',
+  },
 ];
 
 export default function TrustBadges() {
