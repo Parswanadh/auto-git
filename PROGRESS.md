@@ -644,3 +644,47 @@ Result:
 2. Type/lint checks passed.
 3. Static generation succeeded.
 
+---
+
+## Session 33 - Fast Vercel Deploy Unblock And Live Refresh
+
+**Date:** 2026-04-10  
+**Primary Goal:** Ship website changes to live production quickly after repeated Vercel CLI deployment failures.
+
+---
+
+## Problem
+
+1. Production alias was stale and not reflecting latest commits.
+2. CLI deploy attempts failed due file-count limits in monorepo uploads.
+
+---
+
+## Fix Applied
+
+Updated file:
+
+1. `.vercelignore`
+
+Changes:
+
+1. Restricted Vercel CLI upload scope to website app files only.
+2. Excluded local website build/cache artifacts (`.next`, `node_modules`, `.vercel`, tsbuildinfo).
+3. Kept deploy command non-interactive and production-targeted.
+
+---
+
+## Deployment Result
+
+Command used:
+
+1. `vercel --prod --yes --scope parshu`
+
+Outcome:
+
+1. Deployment created: `https://auto-git-prak-site-kfyx7ahz8-parshu.vercel.app`
+2. Aliased to production: `https://auto-git-prak-site.vercel.app`
+3. Live site now shows latest evidence date and new sections:
+	- Executed test run ledger
+	- Output corpus summary metrics from `output/`
+

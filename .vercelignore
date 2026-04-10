@@ -1,0 +1,11 @@
+# Deploy only website app files from this monorepo.
+*
+!website
+!website/**
+!.vercelignore
+
+# Exclude local build/cache artifacts inside website.
+website/.next/
+website/node_modules/
+website/.vercel/
+website/tsconfig.tsbuildinfo
