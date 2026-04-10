@@ -14,6 +14,7 @@ import {
   ReferenceLine,
 } from 'recharts';
 import { evidenceMetrics, executedTestRunLedger } from '@/data/evidenceMetrics';
+import { outputRunDirectoryStats } from '@/data/outputRunDirectoryStats';
 
 const locData = [
   { pass: 1, lines: 712, date: 'Feb 22', label: '' },
@@ -52,6 +53,14 @@ const getBarColor = (pass: number): string => {
   if (pass >= 24 && pass <= 26) return '#EF4444';
   if (pass >= 14) return '#10B981';
   return '#7C3AED';
+};
+
+const getOutputRunBarColor = (files: number, json: number): string => {
+  if (files === 0) return '#64748B';
+  if (files >= 100) return '#22D3EE';
+  if (json > 0) return '#A78BFA';
+  if (files >= 20) return '#10B981';
+  return '#3B82F6';
 };
 
 const runHistory = [
@@ -114,10 +123,34 @@ const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<
   return null;
 };
 
+const OutputRunTooltip = ({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: (typeof outputRunDirectoryStats)[number] }>;
+}) => {
+  if (active && payload && payload.length) {
+    const d = payload[0].payload;
+
+    return (
+      <div className="max-w-xs bg-[rgba(3,7,18,0.95)] border border-[rgba(0,212,255,0.3)] rounded-lg p-3 font-mono text-xs">
+        <div className="text-[#22D3EE] font-bold">Run #{d.index}</div>
+        <div className="text-[rgba(248,250,252,0.86)] break-all">{d.run}</div>
+        <div className="mt-1 text-[rgba(248,250,252,0.7)]">files={d.files} | py={d.py} | md={d.md} | json={d.json}</div>
+        <div className="text-[rgba(248,250,252,0.56)]">size={d.sizeKb.toLocaleString()} KB</div>
+      </div>
+    );
+  }
+
+  return null;
+};
+
 export default function EvolutionSection() {
   const ref = useRef(null);
   const isInView = useInView(ref, { once: true, margin: '-100px' });
   const [showTable, setShowTable] = useState(false);
+  const [showOutputRunsTable, setShowOutputRunsTable] = useState(false);
   const historicalRunCount = locData.length;
   const trackedRunArtifacts = Number(evidenceMetrics.runArtifactsTracked.value);
   const outputTestVolume = Number(evidenceMetrics.outputTestRunVolumeTotal.value);
@@ -153,6 +186,96 @@ export default function EvolutionSection() {
               Executed run ledger artifacts: {ledgerArtifacts}
             </span>
           </div>
+        </motion.div>
+
+        {/* All Output Runs Chart */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={isInView ? { opacity: 1, y: 0 } : {}}
+          transition={{ duration: 0.6, delay: 0.16 }}
+          className="bg-[rgba(3,7,18,0.8)] border border-[rgba(34,211,238,0.2)] rounded-xl p-6 mb-12"
+        >
+          <h3 className="font-orbitron font-semibold text-[#22D3EE] text-lg mb-2 text-center">
+            All Output Runs ({outputRunDirectoryStats.length}) - Files Generated Per Run Directory
+          </h3>
+          <p className="mb-4 text-center text-xs text-[rgba(248,250,252,0.58)]">
+            One bar per output run directory. Hover any bar to see full run name and file breakdown.
+          </p>
+          <div className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={outputRunDirectoryStats} margin={{ top: 20, right: 20, bottom: 30, left: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(34,211,238,0.08)" />
+                <XAxis
+                  dataKey="index"
+                  stroke="rgba(248,250,252,0.4)"
+                  tick={{ fill: 'rgba(248,250,252,0.5)', fontSize: 11 }}
+                  label={{ value: 'Output run index', position: 'bottom', fill: 'rgba(248,250,252,0.4)', fontSize: 12, offset: 15 }}
+                />
+                <YAxis
+                  stroke="rgba(248,250,252,0.4)"
+                  tick={{ fill: 'rgba(248,250,252,0.5)', fontSize: 11 }}
+                  label={{ value: 'Files per run', angle: -90, position: 'insideLeft', fill: 'rgba(248,250,252,0.4)', fontSize: 12 }}
+                />
+                <Tooltip content={<OutputRunTooltip />} />
+                <ReferenceLine y={10} stroke="rgba(245,158,11,0.3)" strokeDasharray="5 5" label={{ value: '10 files', fill: '#F59E0B', fontSize: 10 }} />
+                <Bar dataKey="files" radius={[3, 3, 0, 0]}>
+                  {outputRunDirectoryStats.map((entry) => (
+                    <Cell key={`output-run-${entry.index}`} fill={getOutputRunBarColor(entry.files, entry.json)} fillOpacity={0.86} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-4 justify-center text-xs">
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#22D3EE]" /> High-volume runs (100+ files)</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#10B981]" /> Medium runs (20+ files)</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#A78BFA]" /> Runs with JSON outputs</span>
+            <span className="flex items-center gap-1"><span className="w-3 h-3 rounded bg-[#64748B]" /> Empty/placeholder runs</span>
+          </div>
+
+          <div className="mt-6 text-center">
+            <button
+              onClick={() => setShowOutputRunsTable(!showOutputRunsTable)}
+              className="font-orbitron text-sm font-semibold px-6 py-3 rounded-lg bg-[rgba(34,211,238,0.12)] border border-[rgba(34,211,238,0.35)] text-[#22D3EE] hover:bg-[rgba(34,211,238,0.2)] transition-colors"
+            >
+              {showOutputRunsTable ? 'Hide' : 'Show'} Full Output Run Table ({outputRunDirectoryStats.length})
+            </button>
+          </div>
+
+          {showOutputRunsTable && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              className="mt-4 overflow-x-auto bg-[rgba(3,7,18,0.8)] border border-[rgba(34,211,238,0.2)] rounded-xl"
+            >
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[rgba(34,211,238,0.2)]">
+                    <th className="p-3 text-left text-[#22D3EE] font-orbitron text-xs">Run #</th>
+                    <th className="p-3 text-left text-[#22D3EE] font-orbitron text-xs">Output run directory</th>
+                    <th className="p-3 text-center text-[#22D3EE] font-orbitron text-xs">Files</th>
+                    <th className="p-3 text-center text-[#22D3EE] font-orbitron text-xs">PY</th>
+                    <th className="p-3 text-center text-[#22D3EE] font-orbitron text-xs">MD</th>
+                    <th className="p-3 text-center text-[#22D3EE] font-orbitron text-xs">JSON</th>
+                    <th className="p-3 text-center text-[#22D3EE] font-orbitron text-xs">Size (KB)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {outputRunDirectoryStats.map((r) => (
+                    <tr key={r.index} className="border-b border-[rgba(34,211,238,0.08)]">
+                      <td className="p-3 font-mono text-[rgba(248,250,252,0.72)]">{r.index}</td>
+                      <td className="p-3 text-[rgba(248,250,252,0.68)] break-all">{r.run}</td>
+                      <td className="p-3 text-center text-[rgba(248,250,252,0.68)]">{r.files}</td>
+                      <td className="p-3 text-center text-[rgba(248,250,252,0.68)]">{r.py}</td>
+                      <td className="p-3 text-center text-[rgba(248,250,252,0.68)]">{r.md}</td>
+                      <td className="p-3 text-center text-[rgba(248,250,252,0.68)]">{r.json}</td>
+                      <td className="p-3 text-center text-[rgba(248,250,252,0.68)]">{r.sizeKb.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </motion.div>
+          )}
         </motion.div>
 
         {/* LOC Bar Chart */}

@@ -728,3 +728,58 @@ Result:
 1. Build passed.
 2. Static generation passed.
 
+---
+
+## Session 35 - Graph For Every Output Run
+
+**Date:** 2026-04-10  
+**Primary Goal:** Replace the misleading 27-only visual emphasis by adding a graph that includes every output run directory.
+
+---
+
+## What Was Requested
+
+1. Show graph coverage for each and every output run, not only the historical 27-pass arc.
+
+---
+
+## Implementation Completed
+
+### 1. Generated Full Output-Run Dataset
+
+Added file:
+
+1. `website/data/outputRunDirectoryStats.ts`
+
+Dataset details:
+
+1. 60 output run directories (one row per directory under `output/`)
+2. Per-run metrics: total files, `.py`, `.md`, `.json`, and size in KB
+
+### 2. Added New All-Runs Graph + Full Table
+
+Updated file:
+
+1. `website/components/sections/EvolutionSection.tsx`
+
+Changes:
+
+1. New chart: **All Output Runs (60) - Files Generated Per Run Directory**
+2. One bar per output run index with tooltip showing full run name and file breakdown
+3. New toggle table: full output run table with all 60 runs and per-run stats
+4. Kept historical 27-pass chart as a separate historical context visualization
+
+---
+
+## Validation
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Type/lint checks passed.
+3. Static generation succeeded.
+
