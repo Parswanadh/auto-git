@@ -515,3 +515,69 @@ Result:
 
 1. A pre-existing local modification in `website/package-lock.json` remains unstaged/uncommitted intentionally.
 
+---
+
+## Session 31 - Full Test Run Ledger On Website
+
+**Date:** 2026-04-10  
+**Primary Goal:** Update the website to show all executed test/benchmark run artifacts in one visible, artifact-backed benchmark ledger.
+
+---
+
+## What Was Requested
+
+1. Update the website with all test runs executed.
+2. Make the benchmark area reflect concrete run output files instead of only summary metrics.
+
+---
+
+## Implementation Completed
+
+### 1. Added Artifact-Backed Test Run Ledger Data
+
+Updated file:
+
+1. `website/data/evidenceMetrics.ts`
+
+Changes:
+
+1. Updated evidence date to `2026-04-10`.
+2. Added new exported type `TestRunLedgerEntry`.
+3. Added `executedTestRunLedger` entries covering all run artifacts currently present:
+	- 9 `logs/run_result*.json` files
+	- 2 E2E output snapshots (`output/e2e_todo_app/*.json`)
+	- Karpathy baseline output (`output/benchmark_baseline/baseline_result.json`)
+	- Combined comparison snapshot (`output/benchmark_comparison.json`)
+
+### 2. Wired Ledger Into Benchmark UI
+
+Updated file:
+
+1. `website/components/sections/BenchmarkSection.tsx`
+
+Changes:
+
+1. Imported `executedTestRunLedger`.
+2. Added lane counters (run_result, E2E snapshot, baseline, comparison).
+3. Added a new "Executed Test Run Ledger (Artifact-Backed)" table with columns:
+	- artifact path
+	- lane
+	- executed time
+	- status
+	- summary
+4. Added status color semantics (`PASS`, `NEEDS_FIXES`, `MIXED`) for quick scan during demos.
+
+---
+
+## Validation
+
+Command:
+
+1. `cd website; npm run build`
+
+Result:
+
+1. Build passed.
+2. Type/lint checks passed.
+3. Static prerender passed.
+

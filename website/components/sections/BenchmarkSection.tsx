@@ -6,6 +6,7 @@ import {
   baselineSnapshot,
   EVIDENCE_AS_OF,
   evidenceMetrics,
+  executedTestRunLedger,
   karpathyComparisonRubricWeights,
   phaseGateSnapshot,
 } from '@/data/evidenceMetrics';
@@ -28,6 +29,42 @@ export default function BenchmarkSection() {
 
   const autogitStatus = phaseGateSnapshot.finalSuccess ? 'PASS' : 'NEEDS FIXES';
   const autogitStatusColor = phaseGateSnapshot.finalSuccess ? '#10B981' : '#F59E0B';
+
+  const laneCounts = useMemo(() => {
+    return executedTestRunLedger.reduce(
+      (acc, row) => {
+        if (row.lane === 'Auto-GIT run result') {
+          acc.runResult += 1;
+        } else if (row.lane === 'Auto-GIT E2E snapshot') {
+          acc.e2eSnapshot += 1;
+        } else if (row.lane === 'Karpathy baseline') {
+          acc.baseline += 1;
+        } else if (row.lane === 'Comparison snapshot') {
+          acc.comparison += 1;
+        }
+
+        return acc;
+      },
+      {
+        runResult: 0,
+        e2eSnapshot: 0,
+        baseline: 0,
+        comparison: 0,
+      },
+    );
+  }, []);
+
+  const getStatusClass = (status: 'PASS' | 'NEEDS_FIXES' | 'MIXED') => {
+    if (status === 'PASS') {
+      return 'text-emerald-300';
+    }
+
+    if (status === 'MIXED') {
+      return 'text-amber-300';
+    }
+
+    return 'text-rose-300';
+  };
 
   return (
     <section className="relative py-24 lg:py-32" ref={ref}>
@@ -141,6 +178,60 @@ export default function BenchmarkSection() {
             Evidence snapshot date: {EVIDENCE_AS_OF}. Source metrics from {evidenceMetrics.pipelineNodes.source},{' '}
             {evidenceMetrics.errorMemoryEntries.source}, {phaseGateSnapshot.source}, and {baselineSnapshot.source}.
           </p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0, y: 24 }}
+          animate={isInView ? { opacity: 1, y: 0 } : {}}
+          transition={{ duration: 0.45, delay: 0.35 }}
+          className="mt-6 rounded-2xl border border-[rgba(148,163,184,0.25)] bg-[rgba(2,6,23,0.82)] p-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 className="font-orbitron text-base text-sky-200">Executed Test Run Ledger (Artifact-Backed)</h3>
+            <span className="rounded-md border border-[rgba(56,189,248,0.35)] bg-[rgba(56,189,248,0.14)] px-3 py-1 text-xs font-semibold text-cyan-200">
+              {executedTestRunLedger.length} run artifacts listed
+            </span>
+          </div>
+
+          <div className="mt-3 flex flex-wrap gap-2 text-xs text-[rgba(248,250,252,0.8)]">
+            <span className="rounded-md border border-[rgba(148,163,184,0.32)] bg-[rgba(15,23,42,0.65)] px-2.5 py-1">
+              Auto-GIT run_result: {laneCounts.runResult}
+            </span>
+            <span className="rounded-md border border-[rgba(148,163,184,0.32)] bg-[rgba(15,23,42,0.65)] px-2.5 py-1">
+              E2E snapshots: {laneCounts.e2eSnapshot}
+            </span>
+            <span className="rounded-md border border-[rgba(148,163,184,0.32)] bg-[rgba(15,23,42,0.65)] px-2.5 py-1">
+              Karpathy baseline: {laneCounts.baseline}
+            </span>
+            <span className="rounded-md border border-[rgba(148,163,184,0.32)] bg-[rgba(15,23,42,0.65)] px-2.5 py-1">
+              Comparison snapshots: {laneCounts.comparison}
+            </span>
+          </div>
+
+          <div className="mt-4 overflow-x-auto rounded-xl border border-[rgba(148,163,184,0.2)]">
+            <table className="min-w-full text-sm">
+              <thead>
+                <tr className="border-b border-[rgba(148,163,184,0.2)] bg-[rgba(15,23,42,0.85)] text-left">
+                  <th className="px-3 py-2 font-orbitron text-[11px] text-slate-300">Artifact</th>
+                  <th className="px-3 py-2 font-orbitron text-[11px] text-slate-300">Lane</th>
+                  <th className="px-3 py-2 font-orbitron text-[11px] text-slate-300">Executed</th>
+                  <th className="px-3 py-2 font-orbitron text-[11px] text-slate-300">Status</th>
+                  <th className="px-3 py-2 font-orbitron text-[11px] text-slate-300">Summary</th>
+                </tr>
+              </thead>
+              <tbody>
+                {executedTestRunLedger.map((row) => (
+                  <tr key={row.artifact} className="border-b border-[rgba(148,163,184,0.12)] align-top">
+                    <td className="px-3 py-2 font-mono text-xs text-cyan-200">{row.artifact}</td>
+                    <td className="px-3 py-2 text-xs text-slate-300">{row.lane}</td>
+                    <td className="px-3 py-2 text-xs text-slate-400">{row.executedAt}</td>
+                    <td className={`px-3 py-2 text-xs font-semibold ${getStatusClass(row.status)}`}>{row.status}</td>
+                    <td className="px-3 py-2 text-xs text-[rgba(248,250,252,0.72)]">{row.summary}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </motion.div>
       </div>
     </section>
